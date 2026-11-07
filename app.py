@@ -1,6 +1,5 @@
 
 import streamlit as st
-import streamlit.components.v1 as components
 import requests
 import random
 import json
@@ -14,24 +13,22 @@ st.set_page_config(
 )
 
 API = "https://pokeapi.co/api/v2"
-SHINY_CHANCE = 0.05
+SPRITE_BASE = (
+    "https://raw.githubusercontent.com/"
+    "PokeAPI/sprites/master/sprites/pokemon"
+)
 
-TYPES = {
-    "normal": "노말", "fire": "불꽃", "water": "물",
-    "electric": "전기", "grass": "풀", "ice": "얼음",
-    "fighting": "격투", "poison": "독", "ground": "땅",
-    "flying": "비행", "psychic": "에스퍼", "bug": "벌레",
-    "rock": "바위", "ghost": "고스트", "dragon": "드래곤",
-    "dark": "악", "steel": "강철", "fairy": "페어리"
+TYPE_KO = {
+    "normal": "노말", "fire": "불꽃",
+    "water": "물", "grass": "풀",
+    "electric": "전기", "ice": "얼음",
+    "fighting": "격투", "poison": "독",
+    "ground": "땅", "flying": "비행",
+    "psychic": "에스퍼", "bug": "벌레",
+    "rock": "바위", "ghost": "고스트",
+    "dragon": "드래곤", "dark": "악",
+    "steel": "강철", "fairy": "페어리"
 }
-
-BALLS = [
-    ("몬스터볼", "#ef4444", "", 45),
-    ("슈퍼볼", "#2563eb", "S", 25),
-    ("하이퍼볼", "#292d38", "H", 18),
-    ("마스터볼", "#9333ea", "M", 2),
-    ("프레미어볼", "#f1f5f9", "", 10)
-]
 
 RPS = {
     "가위": "✌️",
@@ -45,126 +42,222 @@ BEATS = {
     "보": "바위"
 }
 
+# -----------------------------
+# API
+# -----------------------------
 
-# ----------------------------
-# 데이터 불러오기
-# ----------------------------
-
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_json(url):
-    response = requests.get(url, timeout=20)
+@st.cache_data(ttl=86400)
+def api_get(url):
+    response = requests.get(url, timeout=15)
     response.raise_for_status()
     return response.json()
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def get_species_list():
-    result = []
+@st.cache_data(ttl=86400)
+def all_species():
+    results = []
     url = f"{API}/pokemon-species?limit=1000"
 
     while url:
-        data = get_json(url)
-        result.extend(data["results"])
+        data = api_get(url)
+        results.extend(data["results"])
         url = data["next"]
 
-    return result
+    return results
 
 
-def draw_pokemon():
-    chosen = random.choice(get_species_list())
-    species = get_json(chosen["url"])
+def species_id_from_url(url):
+    return int(url.rstrip("/").split("/")[-1])
 
-    default_form = next(
+
+def get_name(species):
+    return next(
         (
-            item for item in species["varieties"]
-            if item["is_default"]
-        ),
-        species["varieties"][0]
-    )
-
-    pokemon = get_json(default_form["pokemon"]["url"])
-
-    name = next(
-        (
-            item["name"]
-            for item in species["names"]
-            if item["language"]["name"] == "ko"
+            n["name"]
+            for n in species["names"]
+            if n["language"]["name"] == "ko"
         ),
         species["name"]
     )
 
-    sprites = pokemon.get("sprites") or {}
-    artwork = (
-        (sprites.get("other") or {})
-        .get("official-artwork") or {}
+
+def get_default_pokemon(species):
+    varieties = species.get("varieties", [])
+
+    default = next(
+        (v for v in varieties if v["is_default"]),
+        varieties[0] if varieties else None
     )
 
-    shiny = random.random() < SHINY_CHANCE
+    if default is None:
+        raise ValueError("포켓몬 형태 없음")
 
-    if shiny:
-        image = (
-            artwork.get("front_shiny")
-            or sprites.get("front_shiny")
-        )
-    else:
-        image = (
-            artwork.get("front_default")
-            or sprites.get("front_default")
+    return api_get(default["pokemon"]["url"])
+
+
+def get_images(pokemon):
+    sprites = pokemon.get("sprites") or {}
+    other = sprites.get("other") or {}
+    artwork = other.get("official-artwork") or {}
+
+    number = pokemon["id"]
+
+    return {
+        "normal": [
+            artwork.get("front_default"),
+            sprites.get("front_default"),
+            f"{SPRITE_BASE}/{number}.png"
+        ],
+        "shiny": [
+            artwork.get("front_shiny"),
+            sprites.get("front_shiny"),
+            f"{SPRITE_BASE}/shiny/{number}.png"
+        ]
+    }
+
+
+def get_evolution_chain(species):
+    chain_url = species["evolution_chain"]["url"]
+    data = api_get(chain_url)
+
+    result = []
+
+    def walk(node, parent=None):
+        sid = species_id_from_url(node["species"]["url"])
+
+        # 여러 진화 조건 중 하나를 사용
+        detail = (
+            node["evolution_details"][0]
+            if node.get("evolution_details")
+            else {}
         )
 
-    if species.get("is_mythical"):
-        rarity, color = "환상", "#f9a8d4"
-    elif species.get("is_legendary"):
-        rarity, color = "전설", "#facc15"
+        result.append({
+            "id": sid,
+            "parent": parent,
+            "min_level": detail.get("min_level"),
+            "trigger": (
+                detail.get("trigger") or {}
+            ).get("name")
+        })
+
+        for child in node.get("evolves_to", []):
+            walk(child, sid)
+
+    walk(data["chain"])
+    return result
+
+
+def get_evolutions(species_id):
+    species = api_get(
+        f"{API}/pokemon-species/{species_id}"
+    )
+    chain = get_evolution_chain(species)
+
+    return [
+        node for node in chain
+        if node["parent"] == species_id
+    ]
+
+
+# -----------------------------
+# 포켓몬 생성
+# -----------------------------
+
+def build_pokemon(species_id, level=None, shiny=None):
+    species = api_get(
+        f"{API}/pokemon-species/{species_id}"
+    )
+    pokemon = get_default_pokemon(species)
+
+    if level is None:
+        level = random.randint(1, 10)
+
+    if shiny is None:
+        shiny = random.random() < 0.05
+
+    images = get_images(pokemon)
+
+    if species["is_mythical"]:
+        rarity = "환상"
+    elif species["is_legendary"]:
+        rarity = "전설"
     elif species["capture_rate"] <= 45:
-        rarity, color = "초희귀", "#c4b5fd"
+        rarity = "초희귀"
     elif species["capture_rate"] <= 100:
-        rarity, color = "희귀", "#7dd3fc"
+        rarity = "희귀"
     else:
-        rarity, color = "일반", "#cbd5e1"
-
-    ball = random.choices(
-        BALLS,
-        weights=[item[3] for item in BALLS],
-        k=1
-    )[0]
+        rarity = "일반"
 
     return {
         "uid": str(uuid.uuid4()),
-        "name": name,
-        "number": species["id"],
-        "level": random.randint(1, 100),
+        "species_id": species_id,
+        "pokemon_id": pokemon["id"],
+        "name": get_name(species),
+        "level": level,
         "shiny": shiny,
-        "image": image,
-        "types": " / ".join(
-            TYPES.get(t["type"]["name"], t["type"]["name"])
-            for t in pokemon["types"]
-        ),
         "rarity": rarity,
-        "color": color,
-        "ball": ball[0],
-        "ball_color": ball[1],
-        "ball_mark": ball[2]
+        "types": [
+            TYPE_KO.get(
+                t["type"]["name"],
+                t["type"]["name"]
+            )
+            for t in pokemon["types"]
+        ],
+        "images": images,
+        "ball": random.choice([
+            "몬스터볼", "슈퍼볼",
+            "하이퍼볼", "프레미어볼"
+        ])
     }
 
 
-# ----------------------------
-# 상태 초기화
-# ----------------------------
+def draw_pokemon():
+    species_list = all_species()
+
+    # 처음부터 최종 진화형이 자주 등장하지 않도록
+    # 진화 계열의 시작 단계에 높은 가중치
+    for _ in range(12):
+        entry = random.choice(species_list)
+        sid = species_id_from_url(entry["url"])
+
+        species = api_get(
+            f"{API}/pokemon-species/{sid}"
+        )
+
+        chain = get_evolution_chain(species)
+        node = next(
+            (x for x in chain if x["id"] == sid),
+            None
+        )
+
+        if node and node["parent"] is None:
+            return build_pokemon(sid)
+
+        # 진화형도 낮은 확률로 등장
+        if random.random() < 0.08:
+            return build_pokemon(sid)
+
+    # 재시도 횟수 초과 시 선택된 종 사용
+    return build_pokemon(sid)
+
+
+# -----------------------------
+# 세션 상태
+# -----------------------------
 
 defaults = {
     "page": "home",
-    "current": None,
+    "coins": 100,
     "collection": [],
-    "play_animation": False,
-    "battle_partner": None,
+    "current": None,
+    "selected_uid": None,
     "battle_result": None,
-    "battle_reward": None,
-    "battle_stats": {
-        "win": 0,
-        "draw": 0,
-        "lose": 0
-    }
+    "wins": 0,
+    "losses": 0,
+    "draws": 0,
+    "total_draws": 0,
+    "animation": False
 }
 
 for key, value in defaults.items():
@@ -172,1139 +265,899 @@ for key, value in defaults.items():
         st.session_state[key] = value
 
 
-# ----------------------------
-# 화면 디자인
-# ----------------------------
+def find_pokemon(uid):
+    return next(
+        (
+            p for p in st.session_state.collection
+            if p["uid"] == uid
+        ),
+        None
+    )
+
+
+# -----------------------------
+# 이미지 출력
+# -----------------------------
+
+def pokemon_image(p, width=220):
+    candidates = (
+        p["images"]["shiny"]
+        if p["shiny"]
+        else p["images"]["normal"]
+    )
+
+    candidates = [url for url in candidates if url]
+
+    # 브라우저가 이미지를 불러오지 못하면
+    # 자동으로 다음 이미지 주소 시도
+    data = json.dumps(candidates).replace(
+        "<", "\\u003c"
+    )
+
+    markup = f"""
+    <div style="
+        height:{width + 20}px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+    ">
+        <img id="poke" style="
+            max-width:95%;
+            max-height:{width}px;
+            object-fit:contain;
+            filter:drop-shadow(0 8px 20px #0005);
+        ">
+    </div>
+
+    <script>
+    const urls = {data};
+    const img = document.getElementById("poke");
+    let index = 0;
+
+    function nextImage() {{
+        if(index >= urls.length) {{
+            img.style.display = "none";
+            return;
+        }}
+        img.src = urls[index++];
+    }}
+
+    img.onerror = nextImage;
+    nextImage();
+    </script>
+    """
+
+    components.html(
+        markup,
+        height=width + 25
+    )
+
+
+# -----------------------------
+# 몬스터볼 애니메이션
+# -----------------------------
+
+def ball_animation(p):
+    shiny = json.dumps(p["shiny"])
+
+    markup = """
+    <style>
+    body {
+        margin:0;
+        overflow:hidden;
+        background:transparent;
+    }
+
+    .stage {
+        height:180px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+    }
+
+    .ball {
+        width:95px;
+        height:95px;
+        border-radius:50%;
+        background:
+            linear-gradient(
+                to bottom,
+                #ef4444 0%,
+                #ef4444 45%,
+                #111827 45%,
+                #111827 55%,
+                white 55%,
+                white 100%
+            );
+        border:5px solid #111827;
+        position:relative;
+        animation:shake 0.5s 3;
+        box-shadow:0 10px 25px #0006;
+    }
+
+    .ball:after {
+        content:"";
+        position:absolute;
+        width:28px;
+        height:28px;
+        background:white;
+        border:7px solid #111827;
+        border-radius:50%;
+        left:50%;
+        top:50%;
+        transform:translate(-50%,-50%);
+    }
+
+    .open {
+        animation:disappear .6s forwards;
+    }
+
+    @keyframes shake {
+        0%,100% {transform:rotate(0)}
+        25% {transform:rotate(-22deg)}
+        75% {transform:rotate(22deg)}
+    }
+
+    @keyframes disappear {
+        to {
+            transform:scale(3);
+            opacity:0;
+        }
+    }
+
+    .sparkle {
+        position:absolute;
+        font-size:35px;
+        animation:pop 1s ease-out forwards;
+    }
+
+    @keyframes pop {
+        from {
+            opacity:0;
+            transform:scale(0);
+        }
+        to {
+            opacity:1;
+            transform:scale(2);
+        }
+    }
+    </style>
+
+    <div class="stage" id="stage">
+        <div class="ball" id="ball"></div>
+    </div>
+
+    <script>
+    const shiny = SHINY_VALUE;
+    const ball = document.getElementById("ball");
+
+    setTimeout(() => {
+        ball.classList.add("open");
+
+        if(shiny) {
+            const stage = document.getElementById("stage");
+            const star = document.createElement("div");
+            star.className = "sparkle";
+            star.textContent = "✨🌟✨";
+            stage.appendChild(star);
+        }
+    }, 1600);
+    </script>
+    """
+
+    components.html(
+        markup.replace("SHINY_VALUE", shiny),
+        height=190
+    )
+
+
+# -----------------------------
+# 게임 기능
+# -----------------------------
+
+def new_draw():
+    try:
+        with st.spinner("포켓몬을 찾고 있어요..."):
+            p = draw_pokemon()
+
+        st.session_state.collection.append(p)
+        st.session_state.current = p
+        st.session_state.total_draws += 1
+        st.session_state.animation = True
+        st.session_state.page = "encounter"
+        st.rerun()
+
+    except Exception:
+        st.error("포켓몬을 불러오지 못했습니다.")
+
+
+def level_cost(level):
+    return 10 + level * 3
+
+
+def level_up(uid):
+    p = find_pokemon(uid)
+
+    if p is None:
+        return
+
+    if p["level"] >= 100:
+        st.warning("최대 레벨입니다.")
+        return
+
+    cost = level_cost(p["level"])
+
+    if st.session_state.coins < cost:
+        st.warning("코인이 부족합니다.")
+        return
+
+    st.session_state.coins -= cost
+    p["level"] += 1
+    st.rerun()
+
+
+def evolve_pokemon(uid, target_id, cost):
+    p = find_pokemon(uid)
+
+    if p is None:
+        return
+
+    if st.session_state.coins < cost:
+        st.warning("코인이 부족합니다.")
+        return
+
+    try:
+        with st.spinner("진화하는 중..."):
+            evolved = build_pokemon(
+                target_id,
+                level=p["level"],
+                shiny=p["shiny"]
+            )
+
+        # 기존 포켓몬의 고유 ID와 볼 유지
+        evolved["uid"] = p["uid"]
+        evolved["ball"] = p["ball"]
+
+        st.session_state.coins -= cost
+        p.update(evolved)
+        st.success("진화 성공!")
+        st.rerun()
+
+    except Exception:
+        st.error("진화 데이터를 불러오지 못했습니다.")
+
+
+def play_rps(choice):
+    opponent = random.choice(list(RPS))
+
+    if choice == opponent:
+        result = "draw"
+        reward = 5
+        st.session_state.draws += 1
+
+    elif BEATS[choice] == opponent:
+        result = "win"
+        reward = 30
+        st.session_state.wins += 1
+
+    else:
+        result = "lose"
+        reward = 0
+        st.session_state.losses += 1
+
+    st.session_state.coins += reward
+
+    st.session_state.battle_result = {
+        "mine": choice,
+        "opponent": opponent,
+        "result": result,
+        "reward": reward
+    }
+
+
+# -----------------------------
+# 디자인
+# -----------------------------
 
 st.markdown("""
 <style>
 .stApp {
-    background: linear-gradient(145deg, #06142f, #12366a);
-    color: white;
+    background:linear-gradient(145deg,#06142f,#12366a);
+    color:white;
 }
 
-header[data-testid="stHeader"] {
-    background: transparent;
-}
-
-h1, h2, h3 {
-    color: white !important;
+h1,h2,h3 {
+    color:white!important;
 }
 
 .block-container {
-    padding-top: 2.5rem;
+    padding-top:2rem;
 }
 
-div.stButton > button,
-div.stDownloadButton > button {
-    background: #7dd3fc !important;
-    color: #06142f !important;
-    border: 2px solid #e0f2fe !important;
-    border-radius: 14px !important;
-    min-height: 52px;
+div.stButton>button {
+    background:#7dd3fc!important;
+    color:#06142f!important;
+    border:2px solid white!important;
+    border-radius:14px!important;
+    min-height:48px;
 }
 
-div.stButton > button p,
-div.stDownloadButton > button p {
-    color: #06142f !important;
-    font-weight: 800 !important;
+div.stButton>button p {
+    color:#06142f!important;
+    font-weight:800!important;
 }
 
-div.stButton > button:hover {
-    background: white !important;
+div.stButton>button:hover {
+    background:white!important;
 }
 
 .hero {
-    text-align: center;
-    font-size: clamp(28px, 5vw, 44px);
-    font-weight: 900;
-    margin: 25px 0 15px;
-    color: white;
+    font-size:40px;
+    font-weight:900;
+    text-align:center;
+    margin:25px 0;
+    color:white;
 }
 
-.subtitle {
-    text-align: center;
-    color: #c8ddfa;
-    margin-bottom: 30px;
+.card {
+    padding:20px;
+    background:#ffffff12;
+    border:1px solid #ffffff30;
+    border-radius:20px;
+    margin-bottom:20px;
 }
 
-.collection-box {
-    padding: 20px;
-    border: 1px solid #8abfff66;
-    border-radius: 20px;
-    background: #ffffff0b;
-    margin-bottom: 15px;
-    color: white;
+.info {
+    color:#c8ddfa;
 }
 
-.collection-box h3 {
-    margin: 0 0 12px;
+.coin {
+    color:#fde68a;
+    font-size:24px;
+    font-weight:900;
 }
 
-.collection-box p {
-    color: #c8ddfa;
-}
-
-.record {
-    background: #ffffff0b;
-    border-radius: 15px;
-    padding: 14px;
-    margin-bottom: 16px;
-    color: white;
-}
-
-.menu-card {
-    padding: 25px;
-    background: #ffffff10;
-    border: 1px solid #ffffff30;
-    border-radius: 22px;
-    min-height: 180px;
+.shiny {
+    color:#fde68a;
+    font-weight:800;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ----------------------------
-# 포켓몬 등장 애니메이션
-# ----------------------------
+# -----------------------------
+# 화면 레이아웃
+# -----------------------------
 
-def show_encounter(p, animate=True):
-    data = json.dumps(
-        {
-            **p,
-            "animate": animate,
-            "render_id": str(uuid.uuid4())
-        },
-        ensure_ascii=True
-    ).replace("<", "\\u003c")
+main, sidebar = st.columns([3, 1], gap="large")
 
-    document = """
-<!doctype html>
-<html lang="ko">
-<head>
-<meta charset="utf-8">
-<style>
-* {box-sizing:border-box}
-
-html,body {
-    margin:0;
-    background:transparent;
-    color:white;
-    font-family:system-ui,sans-serif;
-}
-
-.scene {
-    position:relative;
-    height:590px;
-    overflow:hidden;
-    text-align:center;
-}
-
-canvas {
-    position:absolute;
-    inset:0;
-    width:100%;
-    height:100%;
-    pointer-events:none;
-    z-index:5;
-}
-
-.ball-stage {
-    position:absolute;
-    inset:0;
-    display:flex;
-    align-items:center;
-    justify-content:center;
-    flex-direction:column;
-    z-index:2;
-    transition:opacity .3s;
-}
-
-.ball {
-    width:130px;
-    height:130px;
-    position:relative;
-    filter:drop-shadow(0 12px 18px #0007);
-}
-
-.half {
-    position:absolute;
-    width:130px;
-    height:65px;
-    border:5px solid #182237;
-    overflow:hidden;
-    transition:transform .65s ease,opacity .65s;
-}
-
-.top {
-    top:0;
-    border-radius:70px 70px 0 0;
-    background:var(--ball);
-}
-
-.bottom {
-    bottom:0;
-    border-radius:0 0 70px 70px;
-    background:#f8fafc;
-}
-
-.mark {
-    display:block;
-    margin-top:8px;
-    font-size:32px;
-    font-weight:900;
-    color:#facc15;
-}
-
-.belt {
-    position:absolute;
-    top:59px;
-    width:130px;
-    height:12px;
-    background:#182237;
-}
-
-.lock {
-    position:absolute;
-    left:47px;
-    top:47px;
-    width:36px;
-    height:36px;
-    border:7px solid #182237;
-    background:white;
-    border-radius:50%;
-}
-
-.ball-label {
-    margin-top:25px;
-    color:#dbeafe;
-}
-
-.shaking .ball {
-    animation:shake .45s ease-in-out 3;
-}
-
-.open .top {
-    transform:translateY(-75px) rotate(-25deg);
-    opacity:0;
-}
-
-.open .bottom {
-    transform:translateY(75px) rotate(20deg);
-    opacity:0;
-}
-
-.open .belt,
-.open .lock {
-    opacity:0;
-    transition:opacity .2s;
-}
-
-.finished .ball-stage {
-    opacity:0;
-    pointer-events:none;
-}
-
-.flash {
-    position:absolute;
-    left:50%;
-    top:50%;
-    width:20px;
-    height:20px;
-    background:white;
-    border-radius:50%;
-    opacity:0;
-    z-index:3;
-    pointer-events:none;
-}
-
-.open .flash {
-    animation:flash .8s ease-out;
-}
-
-.card {
-    position:relative;
-    margin:20px auto;
-    padding:22px;
-    width:min(94%,430px);
-    border-radius:26px;
-    border:1px solid var(--rarity);
-    background:linear-gradient(145deg,#ffffff17,#ffffff05);
-    opacity:0;
-    visibility:hidden;
-    transform:translateY(25px) scale(.8);
-}
-
-.revealed .card {
-    visibility:visible;
-    opacity:1;
-    transform:none;
-    transition:opacity .6s,transform .6s;
-}
-
-.shiny-card {
-    box-shadow:0 0 30px #facc1533;
-    border:2px solid #fde68a;
-}
-
-.pokemon {
-    display:block;
-    margin:auto;
-    width:245px;
-    height:245px;
-    max-width:95%;
-    object-fit:contain;
-}
-
-h2 {
-    font-size:32px;
-    margin:8px 0 14px;
-}
-
-.number {
-    color:#bdd7fa;
-    font-size:15px;
-}
-
-.badge {
-    display:inline-block;
-    padding:7px 12px;
-    margin:4px;
-    border-radius:24px;
-    background:#ffffff14;
-}
-
-.rarity {
-    color:var(--rarity);
-    font-weight:800;
-}
-
-.shiny {
-    color:#fde68a;
-    border:1px solid #facc1580;
-}
-
-.detail {
-    color:#c8ddfa;
-    line-height:1.8;
-}
-
-.missing {
-    height:245px;
-    display:grid;
-    place-items:center;
-    color:#c8ddfa;
-}
-
-@keyframes shake {
-    0%,100% {transform:rotate(0)}
-    25% {transform:rotate(-22deg) translateX(-8px)}
-    75% {transform:rotate(22deg) translateX(8px)}
-}
-
-@keyframes flash {
-    0% {
-        opacity:0;
-        transform:translate(-50%,-50%) scale(1)
-    }
-    35% {
-        opacity:1;
-        box-shadow:0 0 90px 70px #dbeafe
-    }
-    100% {
-        opacity:0;
-        transform:translate(-50%,-50%) scale(25)
-    }
-}
-</style>
-</head>
-<body>
-
-<div id="scene" class="scene">
-    <canvas id="fx"></canvas>
-
-    <div class="ball-stage">
-        <div class="ball">
-            <div class="half top">
-                <span id="mark" class="mark"></span>
-            </div>
-            <div class="half bottom"></div>
-            <div class="belt"></div>
-            <div class="lock"></div>
-        </div>
-        <div id="ball-label" class="ball-label"></div>
-    </div>
-
-    <div class="flash"></div>
-
-    <div id="card" class="card">
-        <div id="number" class="number"></div>
-        <img id="pokemon" class="pokemon" alt="">
-        <div id="missing" class="missing" hidden>
-            이미지를 불러올 수 없어요
-        </div>
-        <h2 id="name"></h2>
-        <span id="level" class="badge"></span>
-        <span id="rarity" class="badge rarity"></span>
-        <div>
-            <span id="shiny" class="badge"></span>
-        </div>
-        <p id="types" class="detail"></p>
-        <div id="ball-info" class="detail"></div>
-    </div>
-</div>
-
-<script>
-const p = __DATA__;
-
-const scene = document.getElementById("scene");
-const image = document.getElementById("pokemon");
-const missing = document.getElementById("missing");
-
-scene.style.setProperty("--ball", p.ball_color);
-scene.style.setProperty("--rarity", p.color);
-
-function text(id,value) {
-    document.getElementById(id).textContent=value;
-}
-
-text("mark",p.ball_mark);
-text("ball-label",p.ball+" 준비 중...");
-text("number","도감 No. "+String(p.number).padStart(4,"0"));
-text("name",p.name);
-text("level","Lv. "+p.level);
-text("rarity",p.rarity);
-text("types",p.types);
-text("ball-info",p.ball+"에서 등장!");
-text("shiny",p.shiny ? "✨ 이로치 포켓몬!" : "일반 색상");
-
-image.alt=p.name;
-
-if(p.shiny) {
-    document.getElementById("card").classList.add("shiny-card");
-    document.getElementById("shiny").classList.add("shiny");
-}
-
-let launched=false;
-
-function launch() {
-    if(launched)return;
-    launched=true;
-
-    if(!p.animate) {
-        scene.classList.add("finished","revealed");
-        return;
-    }
-
-    text("ball-label",p.ball+"이 흔들리고 있어요!");
-
-    requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-            scene.classList.add("shaking");
-        });
-    });
-
-    setTimeout(() => scene.classList.add("open"),1450);
-
-    setTimeout(() => {
-        scene.classList.add("finished","revealed");
-        celebrate();
-    },2050);
-}
-
-image.onload=launch;
-
-image.onerror=() => {
-    image.style.display="none";
-    missing.hidden=false;
-    launch();
-};
-
-if(p.image) {
-    image.src=p.image;
-    if(image.complete && image.naturalWidth>0)launch();
-} else {
-    image.style.display="none";
-    missing.hidden=false;
-    launch();
-}
-
-setTimeout(launch,5000);
-
-const canvas=document.getElementById("fx");
-const ctx=canvas.getContext("2d");
-
-let width,height,particles=[],start,last,nextBurst=0;
-
-function resize() {
-    width=canvas.clientWidth;
-    height=canvas.clientHeight;
-    const dpr=devicePixelRatio||1;
-    canvas.width=width*dpr;
-    canvas.height=height*dpr;
-    ctx.setTransform(dpr,0,0,dpr,0,0);
-}
-
-resize();
-
-const colors=p.shiny
-    ? ["#facc15","#fde68a","#ffffff"]
-    : ["#7dd3fc","#f9a8d4","#c4b5fd","#86efac","#ffffff"];
-
-function burst() {
-    const x=width*(.15+Math.random()*.7);
-    const y=height*(.15+Math.random()*.45);
-
-    for(let i=0;i<60;i++) {
-        const a=Math.random()*Math.PI*2;
-        const speed=35+Math.random()*150;
-
-        particles.push({
-            x,y,
-            vx:Math.cos(a)*speed,
-            vy:Math.sin(a)*speed,
-            life:1.4+Math.random()*1.2,
-            size:2+Math.random()*4,
-            color:colors[Math.floor(Math.random()*colors.length)]
-        });
-    }
-}
-
-function star(x,y,r) {
-    ctx.beginPath();
-
-    for(let i=0;i<10;i++) {
-        const a=i*Math.PI/5-Math.PI/2;
-        const s=i%2?r*.35:r;
-        const px=x+Math.cos(a)*s;
-        const py=y+Math.sin(a)*s;
-
-        if(i===0)ctx.moveTo(px,py);
-        else ctx.lineTo(px,py);
-    }
-
-    ctx.closePath();
-    ctx.fill();
-}
-
-function frame(now) {
-    if(start===undefined) {
-        start=now;
-        last=now;
-    }
-
-    const elapsed=(now-start)/1000;
-    const dt=Math.min((now-last)/1000,.05);
-    last=now;
-
-    ctx.clearRect(0,0,width,height);
-
-    if(elapsed<3.5 && elapsed>=nextBurst) {
-        burst();
-        nextBurst=elapsed+.5;
-    }
-
-    for(const q of particles) {
-        q.life-=dt;
-        q.x+=q.vx*dt;
-        q.y+=q.vy*dt;
-        q.vy+=25*dt;
-
-        ctx.globalAlpha=Math.max(0,Math.min(1,q.life));
-        ctx.fillStyle=q.color;
-
-        if(p.shiny) {
-            star(q.x,q.y,q.size*2);
-        } else {
-            ctx.beginPath();
-            ctx.arc(q.x,q.y,q.size,0,Math.PI*2);
-            ctx.fill();
-        }
-    }
-
-    ctx.globalAlpha=1;
-    particles=particles.filter(q=>q.life>0);
-
-    if(elapsed<3.5||particles.length) {
-        requestAnimationFrame(frame);
-    }
-}
-
-function celebrate() {
-    requestAnimationFrame(frame);
-}
-</script>
-</body>
-</html>
-"""
-
-    components.html(
-        document.replace("__DATA__", data),
-        height=600,
-        scrolling=False
-    )
-
-
-# ----------------------------
-# 포켓몬 뽑기
-# ----------------------------
-
-def new_draw():
-    try:
-        with st.spinner("포켓몬을 찾는 중..."):
-            pokemon = draw_pokemon()
-
-        st.session_state.current = pokemon
-        st.session_state.collection.append(pokemon)
-        st.session_state.page = "encounter"
-        st.session_state.play_animation = True
-        st.rerun()
-
-    except (
-        requests.RequestException,
-        ValueError,
-        KeyError,
-        IndexError
-    ):
-        st.error("포켓몬을 불러오지 못했어요. 다시 시도해 주세요.")
-
-
-# ----------------------------
-# 가위바위보 배틀
-# ----------------------------
-
-def play_rps(my_choice):
-    opponent = random.choice(list(RPS))
-
-    if my_choice == opponent:
-        result = "draw"
-    elif BEATS[my_choice] == opponent:
-        result = "win"
-    else:
-        result = "lose"
-
-    st.session_state.battle_stats[result] += 1
-
-    st.session_state.battle_result = {
-        "my_choice": my_choice,
-        "opponent_choice": opponent,
-        "result": result
-    }
-
-    st.session_state.battle_reward = None
-
-    if result == "win":
-        st.session_state.battle_reward = {
-            "status": "pending",
-            "pokemon": None
-        }
-
-
-def receive_reward():
-    reward = st.session_state.battle_reward
-
-    if not reward or reward["status"] != "pending":
-        return
-
-    try:
-        with st.spinner("승리 보상을 준비하는 중..."):
-            pokemon = draw_pokemon()
-
-        st.session_state.collection.append(pokemon)
-        st.session_state.battle_reward = {
-            "status": "received",
-            "pokemon": pokemon
-        }
-        st.session_state.play_animation = True
-        st.rerun()
-
-    except (
-        requests.RequestException,
-        ValueError,
-        KeyError,
-        IndexError
-    ):
-        st.error("보상을 불러오지 못했어요. 다시 시도해 주세요.")
-
-
-# ----------------------------
-# 저장 파일 검증
-# ----------------------------
-
-def validate_saved_pokemon(item):
-    if not isinstance(item, dict):
-        raise ValueError("잘못된 기록")
-
-    ball = next(b for b in BALLS if b[0] == item["ball"])
-
-    colors = {
-        "일반": "#cbd5e1",
-        "희귀": "#7dd3fc",
-        "초희귀": "#c4b5fd",
-        "전설": "#facc15",
-        "환상": "#f9a8d4"
-    }
-
-    if item["rarity"] not in colors:
-        raise ValueError("잘못된 희귀도")
-
-    if not isinstance(item["name"], str) or not 1 <= len(item["name"]) <= 100:
-        raise ValueError("잘못된 이름")
-
-    if type(item["number"]) is not int or not 1 <= item["number"] <= 100000:
-        raise ValueError("잘못된 번호")
-
-    if type(item["level"]) is not int or not 1 <= item["level"] <= 100:
-        raise ValueError("잘못된 레벨")
-
-    if type(item["shiny"]) is not bool:
-        raise ValueError("잘못된 이로치 정보")
-
-    if not isinstance(item["types"], str) or len(item["types"]) > 100:
-        raise ValueError("잘못된 타입")
-
-    if not isinstance(item["uid"], str) or len(item["uid"]) > 100:
-        raise ValueError("잘못된 ID")
-
-    image = item.get("image")
-
-    prefix = (
-        "https://raw.githubusercontent.com/"
-        "PokeAPI/sprites/master/"
-    )
-
-    if image is not None:
-        if not isinstance(image, str) or not image.startswith(prefix):
-            raise ValueError("잘못된 이미지 주소")
-
-    return {
-        "uid": item["uid"],
-        "name": item["name"],
-        "number": item["number"],
-        "level": item["level"],
-        "shiny": item["shiny"],
-        "image": image,
-        "types": item["types"],
-        "rarity": item["rarity"],
-        "color": colors[item["rarity"]],
-        "ball": ball[0],
-        "ball_color": ball[1],
-        "ball_mark": ball[2]
-    }
-
-
-# ----------------------------
-# 오른쪽 보관함 메뉴
-# ----------------------------
-
-main, right = st.columns([3, 1], gap="large")
-
-with right:
-    collection = st.session_state.collection
-    shiny_count = sum(p["shiny"] for p in collection)
-    unique_count = len({p["number"] for p in collection})
+with sidebar:
+    st.markdown("### 🎒 트레이너 정보")
 
     st.markdown(
-        f"""
-        <div class="collection-box">
-            <h3>📦 내 포켓몬 보관함</h3>
-            <p>보유: <b>{len(collection)}마리</b></p>
-            <p>발견: <b>{unique_count}종</b></p>
-            <p>✨ 이로치: <b>{shiny_count}마리</b></p>
-        </div>
-        """,
+        f'<div class="coin">🪙 {st.session_state.coins} 코인</div>',
         unsafe_allow_html=True
     )
 
-    if st.button("📦 보관함 들어가기", use_container_width=True):
-        st.session_state.page = "collection"
-        st.rerun()
+    st.write(
+        f"📦 보유 포켓몬: "
+        f"{len(st.session_state.collection)}마리"
+    )
 
-    if st.button("⚔️ 가위바위보 배틀", use_container_width=True):
-        st.session_state.page = "battle"
-        st.rerun()
+    shiny_count = sum(
+        p["shiny"] for p in st.session_state.collection
+    )
 
-    if st.button("🏠 홈으로", use_container_width=True):
+    st.write(f"✨ 이로치: {shiny_count}마리")
+
+    st.divider()
+
+    if st.button("🏠 홈", use_container_width=True):
         st.session_state.page = "home"
         st.rerun()
 
-    save_data = json.dumps(
-        {
-            "version": 1,
-            "pokemon": collection
-        },
-        ensure_ascii=False,
-        indent=2
-    )
+    if st.button("🎲 포켓몬 뽑기", use_container_width=True):
+        new_draw()
+
+    if st.button("⚔️ 배틀", use_container_width=True):
+        st.session_state.page = "battle"
+        st.rerun()
+
+    if st.button("📦 보관함", use_container_width=True):
+        st.session_state.page = "collection"
+        st.rerun()
+
+    if st.button("🌱 육성실", use_container_width=True):
+        st.session_state.page = "training"
+        st.rerun()
+
+    st.divider()
+
+    save_data = {
+        "version": 2,
+        "coins": st.session_state.coins,
+        "collection": st.session_state.collection,
+        "wins": st.session_state.wins,
+        "losses": st.session_state.losses,
+        "draws": st.session_state.draws,
+        "total_draws": st.session_state.total_draws
+    }
 
     st.download_button(
-        "💾 저장 파일 다운로드",
-        data=save_data,
-        file_name="my_pokemon.json",
+        "💾 게임 저장",
+        data=json.dumps(
+            save_data,
+            ensure_ascii=False,
+            indent=2
+        ),
+        file_name="pokemon_save.json",
         mime="application/json",
         use_container_width=True
     )
 
-    with st.expander("📂 저장 파일 불러오기"):
+    with st.expander("📂 게임 불러오기"):
         uploaded = st.file_uploader(
-            "이전에 저장한 JSON 파일",
+            "저장 파일 선택",
             type=["json"]
         )
 
-        if st.button("불러오기", use_container_width=True):
-            if uploaded is None:
-                st.warning("파일을 선택해 주세요.")
-            else:
+        if st.button("불러오기"):
+            if uploaded:
                 try:
-                    if uploaded.size > 10 * 1024 * 1024:
-                        raise ValueError("파일이 너무 큽니다.")
+                    if uploaded.size > 5 * 1024 * 1024:
+                        raise ValueError("파일 크기 초과")
 
-                    saved = json.loads(uploaded.getvalue())
+                    data = json.loads(uploaded.getvalue())
 
-                    if saved.get("version") != 1:
-                        raise ValueError("지원하지 않는 버전")
+                    if data["version"] != 2:
+                        raise ValueError("버전 불일치")
 
-                    records = saved["pokemon"]
+                    coins = data["coins"]
+                    collection = data["collection"]
 
-                    if not isinstance(records, list) or len(records) > 10000:
-                        raise ValueError("잘못된 기록 개수")
+                    if (
+                        type(coins) is not int
+                        or not 0 <= coins <= 100000000
+                        or not isinstance(collection, list)
+                        or len(collection) > 10000
+                    ):
+                        raise ValueError("저장 데이터 오류")
 
-                    restored = [
-                        validate_saved_pokemon(item)
-                        for item in records
-                    ]
+                    validated = []
 
-                    existing = {
-                        item["uid"]
-                        for item in st.session_state.collection
-                    }
+                    for p in collection:
+                        if not isinstance(p, dict):
+                            raise ValueError("포켓몬 데이터 오류")
 
-                    for item in restored:
-                        if item["uid"] not in existing:
-                            st.session_state.collection.append(item)
-                            existing.add(item["uid"])
+                        sid = p["species_id"]
+                        level = p["level"]
+                        shiny = p["shiny"]
+
+                        if (
+                            type(sid) is not int
+                            or not 1 <= sid <= 100000
+                            or type(level) is not int
+                            or not 1 <= level <= 100
+                            or type(shiny) is not bool
+                        ):
+                            raise ValueError("포켓몬 정보 오류")
+
+                        # 외부 파일의 HTML이나 이미지 주소를
+                        # 그대로 신뢰하지 않고 API로 다시 구성
+                        rebuilt = build_pokemon(
+                            sid, level, shiny
+                        )
+
+                        rebuilt["uid"] = str(uuid.uuid4())
+                        validated.append(rebuilt)
+
+                    st.session_state.coins = coins
+                    st.session_state.collection = validated
+
+                    for key in ["wins", "losses", "draws", "total_draws"]:
+                        value = data.get(key, 0)
+                        if type(value) is not int or not 0 <= value <= 10000000:
+                            raise ValueError("전적 정보 오류")
+                        st.session_state[key] = value
 
                     st.session_state.page = "collection"
                     st.rerun()
 
-                except (
-                    ValueError,
-                    KeyError,
-                    TypeError,
-                    StopIteration,
-                    AttributeError
-                ):
-                    st.error("올바른 저장 파일인지 확인해 주세요.")
-
-    st.caption(
-        "포켓몬은 현재 접속 세션에 저장됩니다. "
-        "나중에도 보관하려면 JSON 파일을 다운로드해 주세요."
-    )
+                except Exception:
+                    st.error(
+                        "저장 파일을 확인해 주세요. "
+                        "이전 버전의 저장 파일은 지원하지 않습니다."
+                    )
 
 
-# ----------------------------
-# 메인 페이지
-# ----------------------------
+# -----------------------------
+# 홈
+# -----------------------------
 
 with main:
 
-    # 홈
     if st.session_state.page == "home":
         st.markdown(
-            '<div class="hero">⚡ 포켓몬 어드벤처</div>'
-            '<div class="subtitle">'
-            '포켓몬을 만나고, 파트너와 함께 배틀에 도전하세요!'
-            '</div>',
+            '<div class="hero">⚡ 포켓몬 어드벤처</div>',
+            unsafe_allow_html=True
+        )
+
+        st.markdown(
+            """
+            <div class="card">
+                <h3>나만의 포켓몬을 키워 보세요!</h3>
+                <p class="info">
+                    포켓몬을 뽑고 배틀로 코인을 모으세요.
+                    코인으로 레벨업하고 진화시킬 수 있습니다.
+                </p>
+            </div>
+            """,
             unsafe_allow_html=True
         )
 
         a, b = st.columns(2)
 
         with a:
-            st.subheader("🎲 포켓몬 뽑기")
-            st.write(
-                "몬스터볼에서 랜덤 포켓몬이 등장합니다. "
-                "이로치와 전설의 포켓몬도 만나 보세요!"
-            )
-
-            if st.button("🚀 포켓몬 뽑기", use_container_width=True):
+            if st.button(
+                "🎲 새로운 포켓몬 만나기",
+                use_container_width=True
+            ):
                 new_draw()
 
-        with b:
-            st.subheader("⚔️ 가위바위보 배틀")
-            st.write(
-                "내 포켓몬을 파트너로 선택하고 대결하세요. "
-                "승리하면 새로운 포켓몬을 얻습니다!"
-            )
+            if st.button(
+                "🌱 포켓몬 육성하기",
+                use_container_width=True
+            ):
+                st.session_state.page = "training"
+                st.rerun()
 
-            if st.button("⚔️ 배틀 시작", use_container_width=True):
+        with b:
+            if st.button(
+                "⚔️ 가위바위보 배틀",
+                use_container_width=True
+            ):
                 st.session_state.page = "battle"
                 st.rerun()
 
+            if st.button(
+                "📦 내 포켓몬 보기",
+                use_container_width=True
+            ):
+                st.session_state.page = "collection"
+                st.rerun()
+
+    # -------------------------
     # 포켓몬 등장
+    # -------------------------
+
     elif st.session_state.page == "encounter":
+        p = st.session_state.current
+
         st.markdown(
-            '<div class="hero">포켓몬이 나타났다!</div>',
+            '<div class="hero">야생의 포켓몬이 나타났다!</div>',
             unsafe_allow_html=True
         )
 
-        play = st.session_state.play_animation
-        st.session_state.play_animation = False
+        if st.session_state.animation:
+            ball_animation(p)
+            st.session_state.animation = False
 
-        show_encounter(
-            st.session_state.current,
-            animate=play
+        pokemon_image(p, 270)
+
+        st.markdown(
+            f"## {html.escape(p['name'])}"
         )
 
-        st.success("포켓몬이 보관함에 자동으로 저장됐어요!")
+        st.write(
+            f"Lv. {p['level']} · {p['rarity']}"
+        )
 
-        a, b, c = st.columns(3)
+        if p["shiny"]:
+            st.markdown(
+                '<div class="shiny">✨ 이로치 포켓몬!</div>',
+                unsafe_allow_html=True
+            )
+
+        st.write("타입: " + " / ".join(p["types"]))
+        st.write("몬스터볼: " + p["ball"])
+
+        st.success("보관함에 자동 저장되었습니다!")
+
+        a, b = st.columns(2)
 
         with a:
             if st.button("🎲 다시 뽑기", use_container_width=True):
                 new_draw()
 
         with b:
-            if st.button("⚔️ 함께 배틀하기", use_container_width=True):
-                st.session_state.battle_partner = (
-                    st.session_state.current["uid"]
-                )
-                st.session_state.page = "battle"
+            if st.button("🌱 육성하기", use_container_width=True):
+                st.session_state.selected_uid = p["uid"]
+                st.session_state.page = "training"
                 st.rerun()
 
-        with c:
-            if st.button("🏠 돌아가기", use_container_width=True):
-                st.session_state.page = "home"
-                st.rerun()
+    # -------------------------
+    # 배틀
+    # -------------------------
 
-    # 가위바위보
     elif st.session_state.page == "battle":
         st.markdown(
-            '<div class="hero">⚔️ 포켓몬 가위바위보 배틀</div>'
-            '<div class="subtitle">'
-            '파트너와 함께 상대 트레이너에게 도전하세요!'
-            '</div>',
+            '<div class="hero">⚔️ 가위바위보 배틀</div>',
             unsafe_allow_html=True
         )
 
-        collection = st.session_state.collection
+        st.write("승리하면 30코인, 무승부면 5코인을 얻습니다.")
 
-        if not collection:
-            st.info("포켓몬이 없어요. 먼저 포켓몬을 뽑아 주세요!")
+        a, b, c = st.columns(3)
 
-            if st.button("🎲 첫 포켓몬 뽑기", use_container_width=True):
-                new_draw()
+        a.metric("승리", st.session_state.wins)
+        b.metric("무승부", st.session_state.draws)
+        c.metric("패배", st.session_state.losses)
 
-        else:
-            by_uid = {p["uid"]: p for p in collection}
-            partner_ids = list(by_uid)
+        st.markdown("### 무엇을 낼까요?")
 
-            if st.session_state.battle_partner not in by_uid:
-                st.session_state.battle_partner = partner_ids[0]
+        columns = st.columns(3)
 
-            def partner_label(uid):
-                p = by_uid[uid]
-                shiny = "✨ " if p["shiny"] else ""
-                return f"{shiny}{p['name']} · Lv. {p['level']}"
+        for col, choice in zip(columns, RPS):
+            with col:
+                if st.button(
+                    f"{RPS[choice]} {choice}",
+                    use_container_width=True
+                ):
+                    play_rps(choice)
+                    st.rerun()
 
-            selected_id = st.selectbox(
-                "함께할 포켓몬",
-                options=partner_ids,
-                format_func=partner_label,
-                key="battle_partner"
-            )
+        result = st.session_state.battle_result
 
-            partner = by_uid[selected_id]
+        if result:
+            st.divider()
 
-            a, b = st.columns([1, 2])
+            a, b = st.columns(2)
 
             with a:
-                if partner["image"]:
-                    st.image(partner["image"], width=180)
+                st.subheader("나")
+                st.markdown(
+                    f"## {RPS[result['mine']]} "
+                    f"{result['mine']}"
+                )
 
             with b:
-                st.subheader(partner["name"])
-                st.write(
-                    f"Lv. {partner['level']} · {partner['rarity']}"
+                st.subheader("상대")
+                st.markdown(
+                    f"## {RPS[result['opponent']]} "
+                    f"{result['opponent']}"
                 )
-                st.write(f"타입: {partner['types']}")
 
-            stats = st.session_state.battle_stats
+            if result["result"] == "win":
+                st.success("🏆 승리! +30코인")
 
-            a, b, c = st.columns(3)
-            a.metric("🏆 승리", stats["win"])
-            b.metric("🤝 무승부", stats["draw"])
-            c.metric("💨 패배", stats["lose"])
+            elif result["result"] == "draw":
+                st.info("🤝 무승부! +5코인")
 
-            reward = st.session_state.battle_reward
-            pending = (
-                reward is not None
-                and reward["status"] == "pending"
-            )
+            else:
+                st.warning("💨 패배! 다음에 다시 도전하세요.")
 
-            st.markdown("### 무엇을 낼까요?")
-
-            columns = st.columns(3)
-
-            for column, choice in zip(columns, RPS):
-                with column:
-                    if st.button(
-                        f"{RPS[choice]} {choice}",
-                        key=f"choice_{choice}",
-                        use_container_width=True,
-                        disabled=pending
-                    ):
-                        play_rps(choice)
-                        st.rerun()
-
-            result = st.session_state.battle_result
-
-            if result:
-                st.divider()
-
-                mine, opponent = st.columns(2)
-
-                with mine:
-                    st.subheader("나")
-                    st.markdown(
-                        f"## {RPS[result['my_choice']]} "
-                        f"{result['my_choice']}"
-                    )
-
-                with opponent:
-                    st.subheader("상대")
-                    st.markdown(
-                        f"## {RPS[result['opponent_choice']]} "
-                        f"{result['opponent_choice']}"
-                    )
-
-                if result["result"] == "win":
-                    st.success("🏆 승리! 새로운 포켓몬을 획득했어요!")
-
-                    if pending:
-                        receive_reward()
-
-                        if st.button(
-                            "🎁 보상 다시 받기",
-                            use_container_width=True
-                        ):
-                            receive_reward()
-
-                    elif reward and reward["status"] == "received":
-                        play = st.session_state.play_animation
-                        st.session_state.play_animation = False
-
-                        show_encounter(
-                            reward["pokemon"],
-                            animate=play
-                        )
-
-                        st.caption(
-                            "보상 포켓몬이 보관함에 저장됐어요."
-                        )
-
-                elif result["result"] == "draw":
-                    st.info("🤝 무승부! 다시 도전하세요.")
-
-                else:
-                    st.warning("💨 패배! 다음에는 이길 수 있을 거예요.")
-
+    # -------------------------
     # 보관함
+    # -------------------------
+
     elif st.session_state.page == "collection":
         st.markdown(
             '<div class="hero">📦 내 포켓몬 보관함</div>',
             unsafe_allow_html=True
         )
 
-        if not st.session_state.collection:
-            st.info("아직 포켓몬이 없어요.")
+        collection = st.session_state.collection
+
+        if not collection:
+            st.info("아직 포켓몬이 없습니다.")
 
         else:
-            query = st.text_input("🔎 이름 검색")
+            search = st.text_input("🔎 포켓몬 검색")
             only_shiny = st.checkbox("✨ 이로치만 보기")
 
             order = st.selectbox(
                 "정렬",
-                ["최근에 뽑은 순", "레벨 높은 순", "도감 번호순"]
+                ["최근 획득순", "레벨 높은 순", "도감 번호순"]
             )
 
-            records = [
-                p for p in st.session_state.collection
-                if query.strip() in p["name"]
+            filtered = [
+                p for p in collection
+                if search in p["name"]
                 and (not only_shiny or p["shiny"])
             ]
 
-            if order == "레벨 높은 순":
-                records.sort(
+            if order == "최근 획득순":
+                filtered.reverse()
+            elif order == "레벨 높은 순":
+                filtered.sort(
                     key=lambda p: p["level"],
                     reverse=True
                 )
-            elif order == "도감 번호순":
-                records.sort(key=lambda p: p["number"])
             else:
-                records.reverse()
+                filtered.sort(key=lambda p: p["species_id"])
 
-            st.write(f"총 {len(records)}마리")
+            st.write(f"총 {len(filtered)}마리")
 
-            page_size = 12
+            page_size = 9
             total_pages = max(
-                1,
-                (len(records) + page_size - 1) // page_size
+                1, (len(filtered) + page_size - 1) // page_size
             )
-
-            page_number = st.selectbox(
+            page = st.selectbox(
                 "페이지",
-                range(1, total_pages + 1),
-                key=f"collection_page_{total_pages}"
+                range(1, total_pages + 1)
             )
 
-            start = (page_number - 1) * page_size
-            visible = records[start:start + page_size]
+            start = (page - 1) * page_size
+            visible = filtered[start:start + page_size]
 
-            columns = st.columns(3)
+            cols = st.columns(3)
 
             for i, p in enumerate(visible):
-                with columns[i % 3]:
-                    if p["image"]:
-                        st.image(p["image"], width=170)
-                    else:
-                        st.write("이미지 없음")
-
-                    shiny_label = (
-                        "✨ 이로치" if p["shiny"] else "일반 색상"
-                    )
+                with cols[i % 3]:
+                    pokemon_image(p, 160)
 
                     st.markdown(
-                        f"""
-                        <div class="record">
-                            <b>{html.escape(p["name"])}</b><br>
-                            No. {p["number"]:04d}
-                            · Lv. {p["level"]}<br>
-                            {html.escape(p["rarity"])}
-                            · {shiny_label}<br>
-                            {html.escape(p["types"])}<br>
-                            {html.escape(p["ball"])}
-                        </div>
-                        """,
-                        unsafe_allow_html=True
+                        f"**{html.escape(p['name'])}**"
+                    )
+
+                    st.write(
+                        f"Lv. {p['level']} · {p['rarity']}"
+                    )
+
+                    if p["shiny"]:
+                        st.write("✨ 이로치")
+
+                    if st.button(
+                        "🌱 육성",
+                        key=f"train_{p['uid']}",
+                        use_container_width=True
+                    ):
+                        st.session_state.selected_uid = p["uid"]
+                        st.session_state.page = "training"
+                        st.rerun()
+
+    # -------------------------
+    # 육성실
+    # -------------------------
+
+    elif st.session_state.page == "training":
+        st.markdown(
+            '<div class="hero">🌱 포켓몬 육성실</div>',
+            unsafe_allow_html=True
+        )
+
+        collection = st.session_state.collection
+
+        if not collection:
+            st.info("먼저 포켓몬을 뽑아 주세요.")
+
+        else:
+            by_uid = {p["uid"]: p for p in collection}
+            ids = list(by_uid)
+
+            if st.session_state.selected_uid not in by_uid:
+                st.session_state.selected_uid = ids[0]
+
+            def label(uid):
+                p = by_uid[uid]
+                shiny = "✨ " if p["shiny"] else ""
+                return f"{shiny}{p['name']} · Lv. {p['level']}"
+
+            selected = st.selectbox(
+                "육성할 포켓몬",
+                options=ids,
+                format_func=label,
+                key="selected_uid"
+            )
+
+            p = by_uid[selected]
+
+            pokemon_image(p, 260)
+
+            st.markdown(f"## {html.escape(p['name'])}")
+
+            st.write(
+                f"현재 레벨: **Lv. {p['level']}**"
+            )
+
+            st.write(
+                f"희귀도: {p['rarity']}"
+            )
+
+            if p["shiny"]:
+                st.write("✨ 이로치 포켓몬")
+
+            st.divider()
+
+            st.subheader("⬆️ 레벨업")
+
+            if p["level"] < 100:
+                cost = level_cost(p["level"])
+
+                st.write(
+                    f"Lv. {p['level']} → "
+                    f"Lv. {p['level'] + 1}"
+                )
+
+                st.write(f"필요 코인: 🪙 {cost}")
+
+                if st.button(
+                    f"레벨업하기 ({cost}코인)",
+                    use_container_width=True
+                ):
+                    level_up(selected)
+
+            else:
+                st.success("최대 레벨에 도달했습니다!")
+
+            st.divider()
+
+            st.subheader("✨ 진화")
+
+            try:
+                evolutions = get_evolutions(p["species_id"])
+
+                if not evolutions:
+                    st.info("현재 진화할 수 있는 다음 단계가 없습니다.")
+
+                for evo in evolutions:
+                    target_species = api_get(
+                        f"{API}/pokemon-species/{evo['id']}"
+                    )
+
+                    target_name = get_name(target_species)
+
+                    # 단순화된 자체 진화 규칙
+                    required_level = evo["min_level"] or 20
+                    required_level = min(required_level, 100)
+                    evolution_cost = 100
+
+                    st.write(
+                        f"**{p['name']} → {target_name}**"
+                    )
+
+                    st.write(
+                        f"필요 레벨: Lv. {required_level}"
+                    )
+
+                    st.write(
+                        f"필요 코인: 🪙 {evolution_cost}"
+                    )
+
+                    can_evolve = (
+                        p["level"] >= required_level
+                        and st.session_state.coins >= evolution_cost
                     )
 
                     if st.button(
-                        "⚔️ 파트너로 배틀",
-                        key=f"partner_{p['uid']}",
+                        f"✨ {target_name}(으)로 진화",
+                        key=f"evo_{selected}_{evo['id']}",
+                        disabled=not can_evolve,
                         use_container_width=True
                     ):
-                        st.session_state.battle_partner = p["uid"]
-                        st.session_state.page = "battle"
-                        st.rerun()
+                        evolve_pokemon(
+                            selected,
+                            evo["id"],
+                            evolution_cost
+                        )
+
+                    if p["level"] < required_level:
+                        st.caption("레벨이 부족합니다.")
+
+            except Exception:
+                st.warning(
+                    "진화 정보를 불러오지 못했습니다. "
+                    "잠시 후 다시 시도해 주세요."
+                )
 
 
 with st.expander("📖 게임 규칙"):
     st.write(
-        "포켓몬은 PokéAPI에 등록된 종 중 무작위로 등장합니다. "
-        "레벨은 1~100, 이로치 확률은 5%입니다. "
-        "가위바위보에서 승리하면 포켓몬 한 마리를 보상으로 받습니다. "
-        "패배하거나 무승부일 때는 보상이 없습니다. "
-        "레벨과 희귀도는 가위바위보 승패에 영향을 주지 않습니다. "
-        "포켓몬 보관 기록은 JSON 파일로 저장하고 복원할 수 있습니다."
+        "처음 포켓몬을 획득하면 Lv.1~10으로 등장합니다. "
+        "가위바위보 승리 시 30코인, 무승부 시 5코인을 얻습니다. "
+        "코인으로 레벨업과 진화를 진행할 수 있습니다. "
+        "진화 시 레벨과 이로치 여부는 유지됩니다. "
+        "진화 조건은 게임 플레이를 위해 단순화한 자체 규칙입니다. "
+        "포켓몬 데이터는 PokéAPI에서 불러옵니다. "
+        "저장 파일은 이 버전의 JSON 형식을 사용합니다."
     )
