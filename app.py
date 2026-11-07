@@ -1,26 +1,98 @@
 
 import streamlit as st
 import streamlit.components.v1 as components
+import requests
 import random
 
 st.set_page_config(
-    page_title="환영합니다!",
-    page_icon="🎆",
+    page_title="랜덤 포켓몬",
+    page_icon="⚡",
     layout="centered"
 )
 
-# 페이지 상태
+# 전체 포켓몬 목록 불러오기
+@st.cache_data(ttl=86400)
+def get_pokemon_list():
+    url = "https://pokeapi.co/api/v2/pokemon-species?limit=2000"
+    response = requests.get(url, timeout=15)
+    response.raise_for_status()
+    return response.json()["results"]
+
+
+@st.cache_data(ttl=86400)
+def get_pokemon(species_url):
+    species = requests.get(
+        species_url, timeout=15
+    ).json()
+
+    number = species["id"]
+
+    # 한국어 이름 찾기
+    korean_name = next(
+        (
+            n["name"]
+            for n in species["names"]
+            if n["language"]["name"] == "ko"
+        ),
+        species["name"]
+    )
+
+    # 기본 모습 데이터
+    pokemon = requests.get(
+        f"https://pokeapi.co/api/v2/pokemon/{number}",
+        timeout=15
+    )
+    pokemon.raise_for_status()
+    pokemon = pokemon.json()
+
+    image = (
+        pokemon["sprites"]["other"]
+        ["official-artwork"]["front_default"]
+    )
+
+    if not image:
+        image = pokemon["sprites"]["front_default"]
+
+    types = [
+        t["type"]["name"]
+        for t in pokemon["types"]
+    ]
+
+    return {
+        "name": korean_name,
+        "number": number,
+        "image": image,
+        "types": types
+    }
+
+
+def draw_pokemon():
+    pokemon_list = get_pokemon_list()
+
+    # API에 등록된 종 중 한 마리 선택
+    chosen = random.choice(pokemon_list)
+
+    return get_pokemon(chosen["url"])
+
+
+# 세션 상태
 if "entered" not in st.session_state:
     st.session_state.entered = False
+
+if "pokemon" not in st.session_state:
+    st.session_state.pokemon = None
 
 if "effect" not in st.session_state:
     st.session_state.effect = "fireworks"
 
-# CSS 스타일
+
+# 디자인
 st.markdown("""
 <style>
 .stApp {
-    background: linear-gradient(145deg, #071633, #102D60);
+    background: linear-gradient(
+        145deg, #06142F, #12366A
+    );
     color: white;
 }
 
@@ -29,236 +101,128 @@ h1, h2, h3, p {
 }
 
 .block-container {
-    padding-top: 5rem;
+    padding-top: 4rem;
 }
 
-/* 모든 버튼의 가독성 */
 div.stButton > button {
-    background-color: #7DD3FC !important;
-    color: #06152F !important;
-    border: 2px solid #FFFFFF !important;
+    background: #7DD3FC !important;
+    color: #06142F !important;
+    border: 2px solid white !important;
     border-radius: 16px !important;
-    font-size: 22px !important;
+    font-size: 21px !important;
     font-weight: 800 !important;
-    padding: 14px 25px !important;
-    min-height: 65px !important;
-    box-shadow: 0 5px 20px rgba(0,0,0,0.3);
-    transition: 0.2s;
+    min-height: 62px;
 }
 
 div.stButton > button p {
-    color: #06152F !important;
+    color: #06142F !important;
 }
 
 div.stButton > button:hover {
-    background-color: #FFFFFF !important;
-    color: #06152F !important;
-    transform: scale(1.04);
+    background: white !important;
+    transform: scale(1.03);
 }
 
-div.stButton > button:focus {
-    color: #06152F !important;
+.pokemon-card {
+    background: rgba(255,255,255,0.09);
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 24px;
+    padding: 24px;
+    text-align: center;
+}
+
+.pokemon-name {
+    font-size: 36px;
+    font-weight: 900;
+}
+
+.pokemon-number {
+    color: #BBD9FF !important;
+    font-size: 18px;
 }
 </style>
 """, unsafe_allow_html=True)
 
 
+# 랜덤 축하 효과
 def celebration(effect):
-    """다양한 축하 애니메이션"""
-
     html = """
     <html>
-    <head>
-    <style>
-    body {
-        margin: 0;
-        overflow: hidden;
-        background: transparent;
-    }
-    canvas {
-        width: 100%;
-        height: 100%;
-        display: block;
-    }
-    </style>
-    </head>
-    <body>
-    <canvas id="canvas"></canvas>
-
+    <body style="margin:0;overflow:hidden;">
+    <canvas id="c"></canvas>
     <script>
-    const canvas = document.getElementById("canvas");
-    const ctx = canvas.getContext("2d");
+    const c = document.getElementById("c");
+    const ctx = c.getContext("2d");
 
-    function resize() {
-        canvas.width = window.innerWidth;
-        canvas.height = window.innerHeight;
-    }
-    resize();
-    window.addEventListener("resize", resize);
+    c.width = window.innerWidth;
+    c.height = 210;
 
-    const effect = "EFFECT_NAME";
-    const particles = [];
-
+    const effect = "EFFECT";
     const colors = [
-        "#FF4D6D", "#FFD166", "#06D6A0",
-        "#4CC9F0", "#B388FF", "#FFFFFF"
+        "#FFDD55", "#FF5588",
+        "#55DDFF", "#AA88FF",
+        "#66FFAA", "#FFFFFF"
     ];
 
-    function rand(min, max) {
-        return Math.random() * (max - min) + min;
-    }
+    let particles = [];
 
-    function createParticles() {
-        particles.length = 0;
+    for (let i = 0; i < 150; i++) {
+        let angle = Math.random() * Math.PI * 2;
+        let speed = Math.random() * 4 + 1;
 
-        if (effect === "fireworks") {
-            for (let j = 0; j < 7; j++) {
-                const cx = rand(60, canvas.width - 60);
-                const cy = rand(50, canvas.height * 0.65);
-
-                for (let i = 0; i < 85; i++) {
-                    const angle = Math.random() * Math.PI * 2;
-                    const speed = rand(1, 5);
-
-                    particles.push({
-                        x: cx,
-                        y: cy,
-                        vx: Math.cos(angle) * speed,
-                        vy: Math.sin(angle) * speed,
-                        size: rand(2, 4),
-                        color: colors[Math.floor(Math.random() * colors.length)],
-                        life: rand(60, 120),
-                        gravity: 0.025,
-                        type: "circle"
-                    });
-                }
-            }
-        }
-
-        else if (effect === "confetti") {
-            for (let i = 0; i < 220; i++) {
-                particles.push({
-                    x: rand(0, canvas.width),
-                    y: rand(-canvas.height, 0),
-                    vx: rand(-1.5, 1.5),
-                    vy: rand(1, 3.5),
-                    size: rand(4, 10),
-                    color: colors[Math.floor(Math.random() * colors.length)],
-                    life: 500,
-                    gravity: 0,
-                    type: "rect"
-                });
-            }
-        }
-
-        else if (effect === "stars") {
-            for (let i = 0; i < 160; i++) {
-                particles.push({
-                    x: rand(0, canvas.width),
-                    y: rand(0, canvas.height),
-                    vx: rand(-0.4, 0.4),
-                    vy: rand(-0.6, 0.6),
-                    size: rand(1, 5),
-                    color: colors[Math.floor(Math.random() * colors.length)],
-                    life: 500,
-                    gravity: 0,
-                    type: "star"
-                });
-            }
-        }
-
-        else if (effect === "balloons") {
-            for (let i = 0; i < 55; i++) {
-                particles.push({
-                    x: rand(0, canvas.width),
-                    y: rand(canvas.height, canvas.height * 2),
-                    vx: rand(-0.5, 0.5),
-                    vy: rand(-2.5, -1),
-                    size: rand(10, 23),
-                    color: colors[Math.floor(Math.random() * colors.length)],
-                    life: 600,
-                    gravity: 0,
-                    type: "balloon"
-                });
-            }
-        }
-    }
-
-    createParticles();
-
-    function drawStar(x, y, radius, color) {
-        ctx.fillStyle = color;
-        ctx.beginPath();
-
-        for (let i = 0; i < 10; i++) {
-            const r = i % 2 === 0 ? radius : radius * 0.4;
-            const angle = i * Math.PI / 5 - Math.PI / 2;
-            const px = x + Math.cos(angle) * r;
-            const py = y + Math.sin(angle) * r;
-
-            if (i === 0) ctx.moveTo(px, py);
-            else ctx.lineTo(px, py);
-        }
-
-        ctx.closePath();
-        ctx.fill();
+        particles.push({
+            x: effect === "fireworks"
+                ? c.width / 2
+                : Math.random() * c.width,
+            y: effect === "fireworks"
+                ? c.height / 2
+                : -Math.random() * 210,
+            vx: effect === "fireworks"
+                ? Math.cos(angle) * speed
+                : Math.random() * 2 - 1,
+            vy: effect === "fireworks"
+                ? Math.sin(angle) * speed
+                : Math.random() * 2 + 1,
+            size: Math.random() * 5 + 2,
+            color: colors[
+                Math.floor(Math.random() * colors.length)
+            ]
+        });
     }
 
     let frame = 0;
 
     function animate() {
-        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.clearRect(0,0,c.width,c.height);
 
-        for (const p of particles) {
-            if (p.life <= 0) continue;
-
+        for (let p of particles) {
             p.x += p.vx;
             p.y += p.vy;
-            p.vy += p.gravity;
-            p.life--;
 
-            ctx.globalAlpha = Math.min(1, p.life / 30);
+            if (effect === "fireworks") {
+                p.vy += 0.025;
+            }
+
             ctx.fillStyle = p.color;
+            ctx.beginPath();
 
-            if (p.type === "circle") {
-                ctx.beginPath();
-                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
-                ctx.fill();
-            }
-
-            else if (p.type === "rect") {
-                ctx.save();
-                ctx.translate(p.x, p.y);
-                ctx.rotate(frame * 0.025 + p.x);
-                ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size);
-                ctx.restore();
-            }
-
-            else if (p.type === "star") {
-                drawStar(p.x, p.y, p.size * 2, p.color);
-            }
-
-            else if (p.type === "balloon") {
-                ctx.beginPath();
-                ctx.ellipse(
+            if (effect === "stars") {
+                ctx.fillRect(
                     p.x, p.y,
-                    p.size * 0.75, p.size,
-                    0, 0, Math.PI * 2
+                    p.size, p.size
+                );
+            } else {
+                ctx.arc(
+                    p.x, p.y,
+                    p.size, 0, Math.PI * 2
                 );
                 ctx.fill();
-
-                ctx.strokeStyle = "#FFFFFF88";
-                ctx.beginPath();
-                ctx.moveTo(p.x, p.y + p.size);
-                ctx.lineTo(p.x, p.y + p.size + 18);
-                ctx.stroke();
             }
         }
 
-        ctx.globalAlpha = 1;
         frame++;
 
-        if (frame < 420) {
+        if (frame < 150) {
             requestAnimationFrame(animate);
         }
     }
@@ -269,13 +233,19 @@ def celebration(effect):
     </html>
     """
 
-    html = html.replace("EFFECT_NAME", effect)
-
     components.html(
-        html,
-        height=390,
-        scrolling=False
+        html.replace("EFFECT", effect),
+        height=210
     )
+
+
+def choose_new_pokemon():
+    with st.spinner("포켓몬을 찾는 중..."):
+        st.session_state.pokemon = draw_pokemon()
+
+    st.session_state.effect = random.choice([
+        "fireworks", "confetti", "stars"
+    ])
 
 
 # 시작 화면
@@ -285,20 +255,18 @@ if not st.session_state.entered:
         """
         <h1 style="
             text-align:center;
-            font-size:55px;
-            margin-top:50px;
-            font-weight:900;
+            font-size:48px;
+            margin-top:60px;
         ">
-            WELCOME
+            랜덤 포켓몬 뽑기
         </h1>
 
         <p style="
             text-align:center;
             font-size:20px;
-            color:#D6E8FF !important;
-            margin-bottom:50px;
+            margin-bottom:45px;
         ">
-            아래 버튼을 눌러 입장하세요!
+            어떤 포켓몬이 등장할까요?
         </p>
         """,
         unsafe_allow_html=True
@@ -308,40 +276,32 @@ if not st.session_state.entered:
 
     with center:
         if st.button(
-            "🚀 들어가기",
+            "⚡ 들어가기",
             use_container_width=True
         ):
-            st.session_state.effect = random.choice([
-                "fireworks",
-                "confetti",
-                "stars",
-                "balloons"
-            ])
-            st.session_state.entered = True
-            st.rerun()
+            try:
+                choose_new_pokemon()
+                st.session_state.entered = True
+                st.rerun()
+            except Exception:
+                st.error(
+                    "포켓몬을 불러오지 못했어요. "
+                    "잠시 후 다시 시도해 주세요."
+                )
 
 
-# 환영 화면
+# 포켓몬 등장 화면
 else:
+
+    pokemon = st.session_state.pokemon
 
     st.markdown(
         """
-        <h1 style="
-            text-align:center;
-            font-size:52px;
-            font-weight:900;
-            margin-top:10px;
-            text-shadow:0 0 25px #66CCFF;
-        ">
+        <h1 style="text-align:center;">
             환영합니다!!
         </h1>
-
-        <p style="
-            text-align:center;
-            font-size:19px;
-            color:#D6E8FF !important;
-        ">
-            즐거운 시간을 보내세요!
+        <p style="text-align:center;">
+            야생의 포켓몬이 나타났다!
         </p>
         """,
         unsafe_allow_html=True
@@ -349,12 +309,61 @@ else:
 
     celebration(st.session_state.effect)
 
-    left, center, right = st.columns([1, 2, 1])
+    if pokemon:
+        st.markdown(
+            '<div class="pokemon-card">',
+            unsafe_allow_html=True
+        )
 
-    with center:
-        if st.button(
-            "🏠 돌아가기",
-            use_container_width=True
-        ):
-            st.session_state.entered = False
+        st.markdown(
+            f"""
+            <p class="pokemon-number">
+                도감 No. {pokemon['number']:04d}
+            </p>
+            """,
+            unsafe_allow_html=True
+        )
+
+        if pokemon["image"]:
+            st.image(
+                pokemon["image"],
+                width=260
+            )
+
+        st.markdown(
+            f"""
+            <div class="pokemon-name">
+                {pokemon['name']}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+        st.write(
+            "타입: " + ", ".join(pokemon["types"])
+        )
+
+        st.markdown(
+            "</div>",
+            unsafe_allow_html=True
+        )
+
+    st.write("")
+
+    if st.button(
+        "🎲 다시 뽑기",
+        use_container_width=True
+    ):
+        try:
+            choose_new_pokemon()
             st.rerun()
+        except Exception:
+            st.error("다시 시도해 주세요.")
+
+    if st.button(
+        "🏠 돌아가기",
+        use_container_width=True
+    ):
+        st.session_state.entered = False
+        st.session_state.pokemon = None
+        st.rerun()
