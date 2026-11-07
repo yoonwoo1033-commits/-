@@ -8,9 +8,9 @@ import html
 import math
 from datetime import datetime, timedelta, timezone
 
-# ==========================================
-# 기본 설정
-# ==========================================
+# ============================================
+# 1. 기본 설정
+# ============================================
 
 st.set_page_config(
     page_title="Sleep Free",
@@ -25,7 +25,7 @@ SPRITES = (
     "PokeAPI/sprites/master/sprites/pokemon"
 )
 
-POKEMON = [
+POKEMON_LIST = [
     ("이상해씨", 1, "풀 / 독", "일반"),
     ("파이리", 4, "불꽃", "일반"),
     ("꼬부기", 7, "물", "일반"),
@@ -82,7 +82,10 @@ POKEMON = [
     ("꾸왁스", 912, "물", "희귀")
 ]
 
-DEX = {p[1]: p for p in POKEMON}
+DEX = {
+    item[1]: item
+    for item in POKEMON_LIST
+}
 
 RARITY_WEIGHTS = {
     "일반": 12,
@@ -92,9 +95,9 @@ RARITY_WEIGHTS = {
 }
 
 
-# ==========================================
-# 공통 함수
-# ==========================================
+# ============================================
+# 2. 기본 함수
+# ============================================
 
 def now():
     return datetime.now(KST)
@@ -104,7 +107,7 @@ def parse_time(value):
     dt = datetime.fromisoformat(value)
 
     if dt.tzinfo is None:
-        raise ValueError("시간대 정보가 없습니다.")
+        raise ValueError("시간대가 없는 날짜입니다.")
 
     return dt.astimezone(KST)
 
@@ -113,21 +116,36 @@ def safe(value):
     return html.escape(str(value), quote=True)
 
 
-def make_pokemon(number, level=None, shiny=None, uid=None):
-    name, num, types, rarity = DEX[number]
+def valid_number(value, low, high):
+    return (
+        type(value) in (int, float)
+        and math.isfinite(value)
+        and low <= value <= high
+    )
+
+
+def create_pokemon(
+    number,
+    level=None,
+    shiny=None,
+    uid=None
+):
+    name, number, types, rarity = DEX[number]
+
+    if level is None:
+        level = random.randint(1, 10)
+
+    if shiny is None:
+        shiny = random.random() < 0.05
 
     return {
         "uid": uid or str(uuid.uuid4()),
-        "number": num,
+        "number": number,
         "name": name,
         "types": types,
         "rarity": rarity,
-        "level": level if level is not None
-                 else random.randint(1, 10),
-        "shiny": (
-            random.random() < 0.05
-            if shiny is None else shiny
-        ),
+        "level": level,
+        "shiny": shiny,
         "ball": random.choices(
             [
                 "몬스터볼",
@@ -143,7 +161,7 @@ def make_pokemon(number, level=None, shiny=None, uid=None):
 
 
 def new_profile():
-    starter = make_pokemon(
+    starter = create_pokemon(
         143,
         level=5,
         shiny=False
@@ -159,14 +177,274 @@ def new_profile():
     }
 
 
-# ==========================================
-# 세션 초기화
-# ==========================================
+# ============================================
+# 3. 기존 데이터 자동 변환
+# ============================================
+
+def migrate_profile(p):
+    """
+    이전 버전에서 collection이 없는 경우에도
+    오류 없이 새 데이터 구조로 변환합니다.
+    """
+
+    if not isinstance(p, dict):
+        return new_profile()
+
+    # 이전 수면 목표 설정 복원
+    goal = p.get(
+        "goal_hours",
+        p.get("target", 8.0)
+    )
+
+    if not valid_number(goal, 1, 14):
+        goal = 8.0
+
+    p["goal_hours"] = float(goal)
+
+    # 기존 포켓몬 보관함 확인
+    old_collection = p.get("collection")
+
+    if not isinstance(old_collection, list):
+        old_collection = []
+
+    cleaned = []
+    used_uids = set()
+
+    for item in old_collection:
+        if not isinstance(item, dict):
+            continue
+
+        number = item.get(
+            "number",
+            item.get("species_id")
+        )
+
+        if (
+            type(number) is not int
+            or number not in DEX
+        ):
+            continue
+
+        level = item.get("level", 5)
+
+        if (
+            type(level) is not int
+            or not 1 <= level <= 100
+        ):
+            level = 5
+
+        shiny = item.get("shiny", False)
+
+        if type(shiny) is not bool:
+            shiny = False
+
+        uid = item.get("uid")
+
+        if (
+            not isinstance(uid, str)
+            or not uid
+            or uid in used_uids
+        ):
+            uid = str(uuid.uuid4())
+
+        used_uids.add(uid)
+
+        pokemon = create_pokemon(
+            number,
+            level=level,
+            shiny=shiny,
+            uid=uid
+        )
+
+        if item.get("ball") in [
+            "몬스터볼",
+            "슈퍼볼",
+            "하이퍼볼",
+            "프레미어볼",
+            "마스터볼"
+        ]:
+            pokemon["ball"] = item["ball"]
+
+        cleaned.append(pokemon)
+
+    # 보관함이 없는 이전 사용자에게 잠만보 지급
+    if not cleaned:
+        cleaned = [
+            create_pokemon(
+                143,
+                level=5,
+                shiny=False
+            )
+        ]
+
+    p["collection"] = cleaned
+
+    # 수면 파트너 확인
+    valid_uids = {
+        item["uid"]
+        for item in cleaned
+    }
+
+    if p.get("partner_uid") not in valid_uids:
+        p["partner_uid"] = cleaned[0]["uid"]
+
+    # 이전 수면 시작 시간 복원
+    if "sleep_start" not in p:
+        p["sleep_start"] = p.get(
+            "active_start"
+        )
+
+    if p["sleep_start"] is not None:
+        try:
+            start = parse_time(p["sleep_start"])
+
+            if start > now():
+                p["sleep_start"] = None
+
+        except (ValueError, TypeError):
+            p["sleep_start"] = None
+
+    # 기존 수면 기록 보완
+    records = p.get("records", [])
+
+    if not isinstance(records, list):
+        records = []
+
+    cleaned_records = []
+
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+
+        try:
+            start = parse_time(record["start"])
+            end = parse_time(record["end"])
+
+            if end < start:
+                continue
+
+            target = record.get(
+                "goal",
+                record.get(
+                    "target",
+                    p["goal_hours"]
+                )
+            )
+
+            if not valid_number(target, 1, 14):
+                target = p["goal_hours"]
+
+            awake = record.get(
+                "awake_minutes",
+                0.0
+            )
+
+            duration_minutes = (
+                end - start
+            ).total_seconds() / 60
+
+            if not valid_number(
+                awake,
+                0,
+                duration_minutes
+            ):
+                awake = 0.0
+
+            cleaned_records.append({
+                "uid": str(
+                    record.get("uid")
+                    or uuid.uuid4()
+                ),
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "goal": float(target),
+                "awake_minutes": float(awake),
+                "feeling": str(
+                    record.get(
+                        "feeling",
+                        "미입력"
+                    )
+                )[:50],
+                "memo": str(
+                    record.get("memo", "")
+                )[:500]
+            })
+
+        except (
+            KeyError,
+            ValueError,
+            TypeError,
+            OverflowError
+        ):
+            continue
+
+    p["records"] = cleaned_records
+
+    checks = p.get("day_checks", [])
+
+    if not isinstance(checks, list):
+        checks = []
+
+    cleaned_checks = []
+
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+
+        try:
+            when = parse_time(check["time"])
+            sleepy = check["sleepiness"]
+
+            if (
+                type(sleepy) is int
+                and 1 <= sleepy <= 5
+            ):
+                cleaned_checks.append({
+                    "time": when.isoformat(),
+                    "sleepiness": sleepy
+                })
+
+        except (
+            KeyError,
+            ValueError,
+            TypeError
+        ):
+            continue
+
+    p["day_checks"] = cleaned_checks
+
+    return p
+
+
+# ============================================
+# 4. 세션 초기화
+# ============================================
 
 if "sf_profiles" not in st.session_state:
     st.session_state.sf_profiles = {
         "트레이너": new_profile()
     }
+
+if (
+    not isinstance(
+        st.session_state.sf_profiles,
+        dict
+    )
+    or not st.session_state.sf_profiles
+):
+    st.session_state.sf_profiles = {
+        "트레이너": new_profile()
+    }
+
+# 모든 기존 사용자 데이터 변환
+for username in list(
+    st.session_state.sf_profiles.keys()
+):
+    st.session_state.sf_profiles[username] = (
+        migrate_profile(
+            st.session_state.sf_profiles[username]
+        )
+    )
 
 defaults = {
     "sf_user": "트레이너",
@@ -181,6 +459,13 @@ for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
+if (
+    st.session_state.sf_user
+    not in st.session_state.sf_profiles
+):
+    st.session_state.sf_user = next(
+        iter(st.session_state.sf_profiles)
+    )
 
 today = now().date().isoformat()
 
@@ -190,9 +475,14 @@ if st.session_state.sf_alarm_day != today:
 
 
 def profile():
-    return st.session_state.sf_profiles[
-        st.session_state.sf_user
-    ]
+    username = st.session_state.sf_user
+
+    if username not in st.session_state.sf_profiles:
+        st.session_state.sf_profiles[username] = (
+            new_profile()
+        )
+
+    return st.session_state.sf_profiles[username]
 
 
 def partner():
@@ -200,7 +490,8 @@ def partner():
 
     found = next(
         (
-            item for item in p["collection"]
+            item
+            for item in p["collection"]
             if item["uid"] == p["partner_uid"]
         ),
         None
@@ -214,11 +505,14 @@ def go(page):
     st.rerun()
 
 
-# ==========================================
-# 이미지 표시
-# ==========================================
+# ============================================
+# 5. 포켓몬 이미지
+# ============================================
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(
+    ttl=86400,
+    show_spinner=False
+)
 def get_image(number, shiny):
     urls = []
 
@@ -235,12 +529,16 @@ def get_image(number, shiny):
 
     for url in urls:
         try:
-            response = requests.get(url, timeout=6)
+            response = requests.get(
+                url,
+                timeout=5
+            )
 
             if (
                 response.ok
                 and response.headers.get(
-                    "Content-Type", ""
+                    "Content-Type",
+                    ""
                 ).startswith("image/")
                 and len(response.content) < 5000000
             ):
@@ -258,8 +556,9 @@ def pokemon_image(p, width=200):
         p["shiny"]
     )
 
-    if image:
+    if image is not None:
         st.image(image, width=width)
+
     else:
         st.markdown(
             f"""
@@ -275,46 +574,56 @@ def pokemon_image(p, width=200):
 def pokemon_details(p, width=220):
     pokemon_image(p, width)
 
-    st.markdown(f"### {safe(p['name'])}")
+    st.markdown(
+        f"### {safe(p['name'])}"
+    )
 
     st.write(
         f"Lv. {p['level']} · {p['rarity']}"
     )
 
-    st.write(f"타입: {p['types']}")
+    st.write(
+        f"타입: {p['types']}"
+    )
 
     if p["shiny"]:
         st.success("✨ 이로치 포켓몬!")
 
-    st.caption(f"획득한 볼: {p['ball']}")
+    st.caption(
+        f"획득한 볼: {p['ball']}"
+    )
 
 
-# ==========================================
-# 포켓몬 뽑기
-# ==========================================
+# ============================================
+# 6. 포켓몬 뽑기
+# ============================================
 
 def draw_pokemon():
     chosen = random.choices(
-        POKEMON,
+        POKEMON_LIST,
         weights=[
             RARITY_WEIGHTS[item[3]]
-            for item in POKEMON
+            for item in POKEMON_LIST
         ],
         k=1
     )[0]
 
-    p = make_pokemon(chosen[1])
+    pokemon = create_pokemon(
+        chosen[1]
+    )
 
-    profile()["collection"].append(p)
+    profile()["collection"].append(pokemon)
 
-    st.session_state.sf_last_draw = p["uid"]
+    st.session_state.sf_last_draw = (
+        pokemon["uid"]
+    )
 
     go("draw")
 
 
-# ==========================================
-# 수면 추적
-# ==========================================
+# ============================================
+# 7. 수면 기록
+# ============================================
 
 def start_sleep():
     p = profile()
@@ -328,14 +637,19 @@ def start_sleep():
 def finish_sleep():
     p = profile()
 
-    if not p["sleep_start"]:
+    if p["sleep_start"] is None:
         return
 
-    start = parse_time(p["sleep_start"])
+    start = parse_time(
+        p["sleep_start"]
+    )
+
     end = now()
 
     if end < start:
-        st.error("수면 시간이 올바르지 않습니다.")
+        st.error(
+            "수면 시작·종료 시간이 올바르지 않습니다."
+        )
         return
 
     p["records"].append({
@@ -367,22 +681,27 @@ def sleep_summary(record):
         elapsed - record["awake_minutes"] / 60
     )
 
+    goal = max(
+        1.0,
+        record["goal"]
+    )
+
     score = min(
         100,
-        round(estimated / record["goal"] * 100)
+        round(estimated / goal * 100)
     )
 
     return elapsed, estimated, score
 
 
-# ==========================================
-# 저장·불러오기
-# ==========================================
+# ============================================
+# 8. 저장 및 불러오기
+# ============================================
 
 def save_data():
     return json.dumps(
         {
-            "version": "sleep-free-pokemon-1",
+            "version": "sleep-free-pokemon-2",
             "profiles": st.session_state.sf_profiles
         },
         ensure_ascii=False,
@@ -396,11 +715,19 @@ def load_data(raw):
 
     data = json.loads(raw)
 
-    if (
-        not isinstance(data, dict)
-        or data.get("version") != "sleep-free-pokemon-1"
-    ):
-        raise ValueError("지원하지 않는 저장 파일입니다.")
+    if not isinstance(data, dict):
+        raise ValueError("파일 형식 오류")
+
+    supported = [
+        "sleep-free-pokemon-1",
+        "sleep-free-pokemon-2",
+        "sleep-free-1"
+    ]
+
+    if data.get("version") not in supported:
+        raise ValueError(
+            "지원하지 않는 저장 파일입니다."
+        )
 
     incoming = data.get("profiles")
 
@@ -408,7 +735,7 @@ def load_data(raw):
         not isinstance(incoming, dict)
         or not 1 <= len(incoming) <= 20
     ):
-        raise ValueError("사용자 데이터 오류")
+        raise ValueError("프로필 정보 오류")
 
     restored = {}
 
@@ -418,188 +745,66 @@ def load_data(raw):
             or not 1 <= len(username) <= 30
             or not isinstance(source, dict)
         ):
-            raise ValueError("프로필 오류")
-
-        goal = source.get("goal_hours")
+            raise ValueError("사용자 정보 오류")
 
         if (
-            type(goal) not in (int, float)
-            or not math.isfinite(goal)
-            or not 1 <= goal <= 14
-        ):
-            raise ValueError("목표 시간 오류")
-
-        collection = source.get("collection")
-
-        if (
-            not isinstance(collection, list)
-            or not 1 <= len(collection) <= 1500
-        ):
-            raise ValueError("보관함 오류")
-
-        cleaned = []
-        seen = set()
-
-        for item in collection:
-            if not isinstance(item, dict):
-                raise ValueError("포켓몬 정보 오류")
-
-            number = item.get("number")
-            level = item.get("level")
-            shiny = item.get("shiny")
-
-            if (
-                type(number) is not int
-                or number not in DEX
-                or type(level) is not int
-                or not 1 <= level <= 100
-                or type(shiny) is not bool
-            ):
-                raise ValueError("포켓몬 데이터 오류")
-
-            uid = item.get("uid")
-
-            if (
-                not isinstance(uid, str)
-                or not 1 <= len(uid) <= 100
-                or uid in seen
-            ):
-                uid = str(uuid.uuid4())
-
-            seen.add(uid)
-
-            p = make_pokemon(
-                number,
-                level=level,
-                shiny=shiny,
-                uid=uid
+            "collection" in source
+            and (
+                not isinstance(
+                    source["collection"],
+                    list
+                )
+                or len(source["collection"]) > 1500
             )
-
-            if item.get("ball") in [
-                "몬스터볼",
-                "슈퍼볼",
-                "하이퍼볼",
-                "프레미어볼",
-                "마스터볼"
-            ]:
-                p["ball"] = item["ball"]
-
-            cleaned.append(p)
-
-        partner_uid = source.get("partner_uid")
-
-        if partner_uid not in {
-            item["uid"] for item in cleaned
-        }:
-            partner_uid = cleaned[0]["uid"]
-
-        sleep_start = source.get("sleep_start")
-
-        if sleep_start is not None:
-            if (
-                not isinstance(sleep_start, str)
-                or parse_time(sleep_start) > now()
-            ):
-                raise ValueError("수면 시작 시간 오류")
-
-        records = source.get("records", [])
-        checks = source.get("day_checks", [])
+        ):
+            raise ValueError("보관함 정보 오류")
 
         if (
-            not isinstance(records, list)
-            or len(records) > 5000
-            or not isinstance(checks, list)
-            or len(checks) > 5000
+            "records" in source
+            and (
+                not isinstance(
+                    source["records"],
+                    list
+                )
+                or len(source["records"]) > 5000
+            )
         ):
-            raise ValueError("기록 개수 오류")
+            raise ValueError("수면 기록 정보 오류")
 
-        cleaned_records = []
+        if (
+            "day_checks" in source
+            and (
+                not isinstance(
+                    source["day_checks"],
+                    list
+                )
+                or len(source["day_checks"]) > 5000
+            )
+        ):
+            raise ValueError("낮 시간 기록 오류")
 
-        for record in records:
-            if not isinstance(record, dict):
-                raise ValueError("수면 기록 오류")
-
-            start = parse_time(record["start"])
-            end = parse_time(record["end"])
-
-            awake = record["awake_minutes"]
-            target = record["goal"]
-
-            if (
-                end < start
-                or end > now()
-                or type(awake) not in (int, float)
-                or not math.isfinite(awake)
-                or not 0 <= awake <= (
-                    end - start
-                ).total_seconds() / 60
-                or type(target) not in (int, float)
-                or not math.isfinite(target)
-                or not 1 <= target <= 14
-            ):
-                raise ValueError("수면 기록 값 오류")
-
-            feeling = record.get("feeling", "미입력")
-            memo = record.get("memo", "")
-
-            if (
-                not isinstance(feeling, str)
-                or len(feeling) > 50
-                or not isinstance(memo, str)
-                or len(memo) > 500
-            ):
-                raise ValueError("메모 오류")
-
-            cleaned_records.append({
-                "uid": str(uuid.uuid4()),
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "goal": float(target),
-                "awake_minutes": float(awake),
-                "feeling": feeling,
-                "memo": memo
-            })
-
-        cleaned_checks = []
-
-        for check in checks:
-            if not isinstance(check, dict):
-                raise ValueError("낮 시간 기록 오류")
-
-            check_time = parse_time(check["time"])
-            sleepiness = check["sleepiness"]
-
-            if (
-                type(sleepiness) is not int
-                or not 1 <= sleepiness <= 5
-                or check_time > now()
-            ):
-                raise ValueError("졸림 기록 오류")
-
-            cleaned_checks.append({
-                "time": check_time.isoformat(),
-                "sleepiness": sleepiness
-            })
-
-        restored[username] = {
-            "goal_hours": float(goal),
-            "collection": cleaned,
-            "partner_uid": partner_uid,
-            "sleep_start": sleep_start,
-            "records": cleaned_records,
-            "day_checks": cleaned_checks
-        }
+        restored[username] = migrate_profile(
+            source
+        )
 
     st.session_state.sf_profiles = restored
-    st.session_state.sf_user = next(iter(restored))
+    st.session_state.sf_user = next(
+        iter(restored)
+    )
+
+    st.session_state.sf_last_draw = None
     st.session_state.sf_alarm_on = False
+
+    st.session_state.sf_notice = (
+        "저장 파일을 불러왔어요."
+    )
 
     go("home")
 
 
-# ==========================================
-# CSS 디자인
-# ==========================================
+# ============================================
+# 9. 화면 디자인
+# ============================================
 
 st.markdown("""
 <style>
@@ -610,7 +815,7 @@ st.markdown("""
         #06152e,
         #123460
     );
-    color: #f8fbff;
+    color: #ffffff;
 }
 
 header[data-testid="stHeader"] {
@@ -627,20 +832,19 @@ h1, h2, h3, h4 {
 }
 
 [data-testid="stMarkdownContainer"] {
-    color: #f8fbff;
+    color: #ffffff;
 }
 
 [data-testid="stMarkdownContainer"] p {
-    color: #f8fbff;
+    color: #ffffff;
 }
 
 [data-testid="stCaptionContainer"] p {
-    color: #c7d8ef !important;
+    color: #cbdcf2 !important;
 }
 
 [data-testid="stWidgetLabel"] p {
     color: #ffffff !important;
-    font-weight: 650;
 }
 
 [data-testid="stMetricLabel"] p,
@@ -667,6 +871,10 @@ div.stButton > button:hover {
     background: #c7ecff !important;
 }
 
+div.stButton > button:disabled {
+    opacity: 0.5;
+}
+
 [data-baseweb="input"] input,
 [data-baseweb="textarea"] textarea {
     background: #eaf3ff !important;
@@ -689,17 +897,24 @@ div.stButton > button:hover {
     background: #f4f8ff !important;
 }
 
-[data-baseweb="popover"] li,
-[role="listbox"] li {
+[role="listbox"] {
+    background: #f4f8ff !important;
+}
+
+[role="option"] {
     color: #0b2443 !important;
+}
+
+[role="option"]:hover {
+    background: #dbeafe !important;
 }
 
 .hero {
     text-align: center;
-    font-size: clamp(32px, 5vw, 49px);
+    font-size: clamp(32px,5vw,49px);
     font-weight: 900;
     margin: 20px 0 10px;
-    color: white;
+    color: #ffffff;
 }
 
 .subtitle {
@@ -781,22 +996,30 @@ div.stButton > button:hover {
 }
 
 @keyframes shake {
-    0%,100% { transform:rotate(0); }
-    25% { transform:rotate(-18deg); }
-    75% { transform:rotate(18deg); }
+    0%,100% {
+        transform:rotate(0);
+    }
+    25% {
+        transform:rotate(-18deg);
+    }
+    75% {
+        transform:rotate(18deg);
+    }
 }
 
-@media (prefers-reduced-motion: reduce) {
-    .ball { animation:none; }
+@media (prefers-reduced-motion:reduce) {
+    .ball {
+        animation:none;
+    }
 }
 
 </style>
 """, unsafe_allow_html=True)
 
 
-# ==========================================
-# 오른쪽 메뉴
-# ==========================================
+# ============================================
+# 10. 오른쪽 메뉴
+# ============================================
 
 main, right = st.columns(
     [3, 1],
@@ -835,12 +1058,14 @@ with right:
         ):
             name = new_name.strip()
 
-            if (
-                not name
-                or name in st.session_state.sf_profiles
-            ):
+            if not name:
                 st.warning(
-                    "다른 사용자 이름을 입력해 주세요."
+                    "이름을 입력해 주세요."
+                )
+
+            elif name in st.session_state.sf_profiles:
+                st.warning(
+                    "이미 존재하는 사용자입니다."
                 )
 
             elif len(st.session_state.sf_profiles) >= 20:
@@ -852,8 +1077,10 @@ with right:
                 st.session_state.sf_profiles[name] = (
                     new_profile()
                 )
+
                 st.session_state.sf_user = name
                 st.session_state.sf_alarm_on = False
+
                 go("home")
 
     st.caption(
@@ -866,12 +1093,16 @@ with right:
     st.markdown(
         f"""
         <div class="panel">
-            <b>📦 포켓몬 {len(p["collection"])}마리</b>
+            <b>
+                📦 포켓몬 {len(p["collection"])}마리
+            </b>
             <p>
-                🌙 수면 파트너: {safe(partner()["name"])}
+                🌙 수면 파트너:
+                {safe(partner()["name"])}
             </p>
             <p>
-                📚 수면 기록: {len(p["records"])}회
+                📚 수면 기록:
+                {len(p["records"])}회
             </p>
         </div>
         """,
@@ -913,7 +1144,8 @@ with right:
         )
 
         st.caption(
-            "불러오면 현재 프로필과 기록이 교체됩니다."
+            "불러오면 현재 프로필과 기록이 "
+            "저장 파일의 내용으로 교체됩니다."
         )
 
         if st.button(
@@ -921,11 +1153,15 @@ with right:
             use_container_width=True
         ):
             if uploaded is None:
-                st.warning("파일을 선택해 주세요.")
+                st.warning(
+                    "파일을 선택해 주세요."
+                )
 
             else:
                 try:
-                    load_data(uploaded.getvalue())
+                    load_data(
+                        uploaded.getvalue()
+                    )
 
                 except (
                     ValueError,
@@ -939,26 +1175,29 @@ with right:
                     )
 
     st.caption(
-        "세션이 종료되면 저장하지 않은 데이터는 "
+        "세션이 종료되면 저장하지 않은 기록이 "
         "사라질 수 있어요."
     )
 
 
-# ==========================================
-# 메인 화면
-# ==========================================
+# ============================================
+# 11. 메인 화면
+# ============================================
 
 with main:
     p = profile()
     page = st.session_state.sf_page
 
     if st.session_state.sf_notice:
-        st.success(st.session_state.sf_notice)
+        st.success(
+            st.session_state.sf_notice
+        )
+
         st.session_state.sf_notice = ""
 
-    # --------------------------------------
+    # ----------------------------------------
     # 홈
-    # --------------------------------------
+    # ----------------------------------------
 
     if page == "home":
         st.markdown(
@@ -978,7 +1217,10 @@ with main:
         )
 
         with center:
-            pokemon_image(partner(), 250)
+            pokemon_image(
+                partner(),
+                250
+            )
 
             st.markdown(
                 f"""
@@ -1007,10 +1249,14 @@ with main:
         a, b = st.columns(2)
 
         with a:
+            label = (
+                "🌙 수면 기록으로"
+                if p["sleep_start"]
+                else "🌙 수면 추적 시작"
+            )
+
             if st.button(
-                "🌙 수면 추적 시작"
-                if not p["sleep_start"]
-                else "🌙 수면 기록으로",
+                label,
                 use_container_width=True
             ):
                 if p["sleep_start"]:
@@ -1038,13 +1284,13 @@ with main:
                 go("collection")
 
         st.caption(
-            "수면 시간은 시작·종료 버튼을 기준으로 "
-            "기록합니다. 실제 수면 단계를 측정하지는 않아요."
+            "수면 시작과 종료 시각을 기록하는 기능이며, "
+            "실제 수면 단계를 자동 측정하지는 않습니다."
         )
 
-    # --------------------------------------
+    # ----------------------------------------
     # 포켓몬 뽑기
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "draw":
         st.markdown(
@@ -1053,7 +1299,7 @@ with main:
                 🎲 포켓몬 뽑기
             </div>
             <div class="subtitle">
-                포켓몬을 모아 함께 잘 파트너를 선택하세요!
+                새로운 수면 파트너를 만나 보세요!
             </div>
             """,
             unsafe_allow_html=True
@@ -1063,7 +1309,8 @@ with main:
 
         found = next(
             (
-                item for item in p["collection"]
+                item
+                for item in p["collection"]
                 if item["uid"] == uid
             ),
             None
@@ -1075,7 +1322,10 @@ with main:
                 unsafe_allow_html=True
             )
 
-            pokemon_details(found, 250)
+            pokemon_details(
+                found,
+                250
+            )
 
             st.success(
                 "포켓몬이 보관함에 추가됐어요!"
@@ -1095,13 +1345,16 @@ with main:
                 go("home")
 
         else:
-            pokemon_image(partner(), 180)
+            pokemon_image(
+                partner(),
+                180
+            )
 
             st.markdown(
                 """
                 <div class="panel">
-                    처음에는 낮은 레벨의 포켓몬이 등장해요.
-                    이로치 포켓몬도 만날 수 있어요!
+                    몬스터볼을 던져 포켓몬을 만나 보세요.
+                    이로치 포켓몬은 5% 확률로 등장해요!
                 </div>
                 """,
                 unsafe_allow_html=True
@@ -1119,9 +1372,9 @@ with main:
         ):
             go("collection")
 
-    # --------------------------------------
+    # ----------------------------------------
     # 포켓몬 보관함
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "collection":
         st.markdown(
@@ -1150,7 +1403,9 @@ with main:
         a, b = st.columns([2, 1])
 
         with a:
-            search = st.text_input("🔎 이름 검색")
+            search = st.text_input(
+                "🔎 이름 검색"
+            )
 
         with b:
             shiny_only = st.checkbox(
@@ -1167,7 +1422,8 @@ with main:
         )
 
         records = [
-            item for item in collection
+            item
+            for item in collection
             if search.strip() in item["name"]
             and (
                 not shiny_only
@@ -1201,7 +1457,9 @@ with main:
                 range(1, total_pages + 1)
             )
 
-            start = (page_number - 1) * page_size
+            start = (
+                page_number - 1
+            ) * page_size
 
             visible = records[
                 start:start + page_size
@@ -1211,16 +1469,23 @@ with main:
 
             for i, pokemon in enumerate(visible):
                 with columns[i % 3]:
-                    with st.container(border=True):
-                        pokemon_image(pokemon, 150)
+                    with st.container(
+                        border=True
+                    ):
+                        pokemon_image(
+                            pokemon,
+                            150
+                        )
+
+                        shiny_label = (
+                            " ✨"
+                            if pokemon["shiny"]
+                            else ""
+                        )
 
                         st.markdown(
-                            f"**{safe(pokemon['name'])}**"
-                            + (
-                                " ✨"
-                                if pokemon["shiny"]
-                                else ""
-                            )
+                            f"**{safe(pokemon['name'])}"
+                            f"{shiny_label}**"
                         )
 
                         st.caption(
@@ -1262,9 +1527,9 @@ with main:
         ):
             draw_pokemon()
 
-    # --------------------------------------
+    # ----------------------------------------
     # 수면 추적
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "sleep":
         if not p["sleep_start"]:
@@ -1280,7 +1545,10 @@ with main:
                 unsafe_allow_html=True
             )
 
-            pokemon_image(partner(), 220)
+            pokemon_image(
+                partner(),
+                220
+            )
 
             if st.button(
                 "🌙 수면 추적 시작",
@@ -1320,13 +1588,13 @@ with main:
                 finish_sleep()
 
             st.caption(
-                "새로고침해도 같은 세션에서는 시작 시간이 "
-                "유지됩니다. 세션이 만료되면 사라질 수 있어요."
+                "같은 세션에서는 새로고침해도 "
+                "수면 시작 시간이 유지됩니다."
             )
 
-    # --------------------------------------
+    # ----------------------------------------
     # 수면 결과
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "result":
         if not p["records"]:
@@ -1346,7 +1614,10 @@ with main:
                 unsafe_allow_html=True
             )
 
-            pokemon_image(partner(), 200)
+            pokemon_image(
+                partner(),
+                200
+            )
 
             a, b, c = st.columns(3)
 
@@ -1385,8 +1656,8 @@ with main:
             )
 
             st.caption(
-                "점수는 목표 수면 시간 대비 기록 비율입니다. "
-                "객관적인 수면의 질 점수는 아니에요."
+                "점수는 목표 수면 시간 대비 달성 비율이며, "
+                "객관적인 수면의 질 점수는 아닙니다."
             )
 
             with st.form(
@@ -1403,7 +1674,9 @@ with main:
                     min_value=0.0,
                     max_value=maximum,
                     value=min(
-                        float(record["awake_minutes"]),
+                        float(
+                            record["awake_minutes"]
+                        ),
                         maximum
                     ),
                     step=5.0
@@ -1421,7 +1694,9 @@ with main:
                     "일어난 뒤 느낌",
                     feelings,
                     index=(
-                        feelings.index(record["feeling"])
+                        feelings.index(
+                            record["feeling"]
+                        )
                         if record["feeling"] in feelings
                         else 0
                     )
@@ -1436,9 +1711,13 @@ with main:
                 if st.form_submit_button(
                     "기록 반영"
                 ):
-                    record["awake_minutes"] = float(awake)
+                    record["awake_minutes"] = (
+                        float(awake)
+                    )
+
                     record["feeling"] = feeling
                     record["memo"] = memo
+
                     st.rerun()
 
             st.warning(
@@ -1453,9 +1732,9 @@ with main:
             ):
                 go("day")
 
-    # --------------------------------------
+    # ----------------------------------------
     # 낮 시간
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "day":
         st.markdown(
@@ -1470,7 +1749,10 @@ with main:
             unsafe_allow_html=True
         )
 
-        pokemon_image(partner(), 180)
+        pokemon_image(
+            partner(),
+            180
+        )
 
         st.toggle(
             "🔔 졸림 알람 켜기 (기본 꺼짐)",
@@ -1478,9 +1760,8 @@ with main:
         )
 
         st.caption(
-            "매일 한국 시간 기준으로 꺼짐 상태로 "
-            "초기화됩니다. 브라우저를 닫은 상태에서는 "
-            "자동 알림이 보장되지 않아요."
+            "알람은 매일 한국 시간 기준으로 "
+            "꺼짐 상태로 초기화됩니다."
         )
 
         with st.form("day_check"):
@@ -1547,12 +1828,12 @@ with main:
         st.caption(
             "현재 기능은 사용자가 직접 입력한 "
             "졸림 정도를 바탕으로 안내합니다. "
-            "웨어러블 실시간 측정 기능은 아니에요."
+            "웨어러블 실시간 측정 기능은 아닙니다."
         )
 
-    # --------------------------------------
+    # ----------------------------------------
     # 수면 기록 보관함
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "history":
         st.markdown(
@@ -1607,11 +1888,13 @@ with main:
                     )
 
                     if record["memo"]:
-                        st.write(record["memo"])
+                        st.write(
+                            record["memo"]
+                        )
 
-    # --------------------------------------
+    # ----------------------------------------
     # 설정
-    # --------------------------------------
+    # ----------------------------------------
 
     elif page == "settings":
         st.markdown(
@@ -1624,12 +1907,17 @@ with main:
                 "목표 수면 시간",
                 min_value=1.0,
                 max_value=14.0,
-                value=float(p["goal_hours"]),
+                value=float(
+                    p["goal_hours"]
+                ),
                 step=0.5
             )
 
-            if st.form_submit_button("저장"):
+            if st.form_submit_button(
+                "설정 저장"
+            ):
                 p["goal_hours"] = float(goal)
+
                 st.success(
                     "목표 수면 시간을 저장했어요."
                 )
@@ -1638,7 +1926,10 @@ with main:
 
         st.subheader("🌙 수면 파트너")
 
-        pokemon_image(partner(), 180)
+        pokemon_image(
+            partner(),
+            180
+        )
 
         st.write(
             f'현재 파트너: **{partner()["name"]}**'
@@ -1661,10 +1952,14 @@ with main:
         )
 
 
+# ============================================
+# 12. 앱 안내
+# ============================================
+
 with st.expander("📖 Sleep Free 안내"):
     st.write(
         "Sleep Free는 수면 습관을 기록하는 앱입니다. "
-        "포켓몬을 뽑아 보관하고 수면 파트너로 선택할 수 있어요. "
+        "포켓몬을 뽑아 보관하고 수면 파트너로 선택할 수 있습니다. "
         "수면 시작과 종료 버튼만으로 실제 수면 단계나 "
         "수면의 질을 측정할 수는 없습니다. "
         "점수는 목표 시간 달성도이며, "
